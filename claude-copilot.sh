@@ -30,6 +30,8 @@ _cc_cleanup() {
   return 0
 }
 
+_cc_fail() { trap - HUP TERM INT; return 1; }
+
 claude-copilot() {
   unset _cc_sig
   _cc_check || return 1
@@ -480,23 +482,19 @@ if sys.argv[1] == "serve":
   trap '_cc_cleanup "$spid" "$pf"; trap - HUP TERM INT; _cc_sig=130; return 130' INT
 
   # 1) login: no-op when a token is already stored
-  if ! python3 -c "$shim" login; then
-    trap - HUP TERM INT
-    return 1
-  fi
+  python3 -c "$shim" login || { _cc_fail; return; }
 
   # 2) shim: own instance per run on a free port (or COPILOT_SHIM_PORT), it writes "pid port" to a temp file
-  case "$sport" in ''|*[!0-9]*) echo "claude-copilot: COPILOT_SHIM_PORT must be a port number, got '$sport'" >&2; trap - HUP TERM INT; return 1 ;; esac
+  case "$sport" in ''|*[!0-9]*) echo "claude-copilot: COPILOT_SHIM_PORT must be a port number, got '$sport'" >&2; _cc_fail; return ;; esac
   if [ "$sport" != 0 ] && python3 -c 'import socket, sys; sys.exit(0 if socket.socket().connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$sport"; then
     echo "claude-copilot: port $sport busy, unset COPILOT_SHIM_PORT to pick a free one" >&2
-    trap - HUP TERM INT
-    return 1
+    _cc_fail; return
   fi
   if [ -L "$log" ]; then
-    echo "claude-copilot: refusing to write to $log, it is a symlink" >&2; trap - HUP TERM INT; return 1
+    echo "claude-copilot: refusing to write to $log, it is a symlink" >&2; _cc_fail; return
   fi
-  key=$(python3 -c 'import secrets; print(secrets.token_hex(24))') || { trap - HUP TERM INT; return 1; }
-  pf=$(mktemp "${TMPDIR:-/tmp}/claude-copilot.XXXXXX") || { trap - HUP TERM INT; return 1; }
+  key=$(python3 -c 'import secrets; print(secrets.token_hex(24))') || { _cc_fail; return; }
+  pf=$(mktemp "${TMPDIR:-/tmp}/claude-copilot.XXXXXX") || { _cc_fail; return; }
   ( umask 077; COPILOT_SHIM_KEY="$key" nohup python3 -c "$shim" serve "$sport" "$pf" >>"$log" 2>&1 & echo $! >"$pf.pid" )
   sport=""
   for i in $(seq 1 100); do
@@ -508,8 +506,7 @@ if sys.argv[1] == "serve":
     echo "claude-copilot: shim didn't start, see $log" >&2
     tail -n 5 "$log" 2>/dev/null | sed 's/^/  /' >&2
     _cc_cleanup "$spid" "$pf"
-    trap - HUP TERM INT
-    return 1
+    _cc_fail; return
   fi
 
   # 3) claude, with env scoped to this one command (shell env stays clean).
