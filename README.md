@@ -8,7 +8,7 @@ One self-contained file: `claude-copilot.sh`. Works in bash 3.2+ (incl. macOS `/
 
 ## Requirements
 
-`python3` (3.6+), `curl`, `claude` (Claude Code). Run it from a normal terminal. No node, no npm packages. The script checks these on startup and tells you what's missing.
+`python3` (3.6+), `curl`, `claude` (Claude Code). Run it from an interactive terminal (the first-run login needs one). No node, no npm packages. The script checks these on startup and tells you what's missing.
 
 First run asks for a GitHub device-code login (open the URL, type the code). The login is kept in `~/.local/share/claude-copilot/github_token` (mode 600). If you already logged in with copilot-api (`~/.local/share/copilot-api`), that token is reused.
 
@@ -18,7 +18,7 @@ First run asks for a GitHub device-code login (open the URL, type the code). The
 curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/install.sh | bash
 ```
 
-Installs to `~/.local/bin/claude-copilot` (override with `INSTALL_DIR`). Rerun to update. Set `CLAUDE_COPILOT_REF` to pin a branch, tag or commit.
+Installs to `~/.local/bin/claude-copilot` (override with `INSTALL_DIR`). Rerun to update. Set `CLAUDE_COPILOT_REF` to pin a branch, tag or commit. Want to read it first? Download `install.sh` and run it yourself.
 
 ## Uninstall
 
@@ -56,7 +56,11 @@ One small python server (embedded in the script) sits between Claude Code and Co
 - **Fixes on the way:**
     - Claude Code 2.1.x sends a trailing `role: "system"` message in `messages`, and Copilot's Claude 5.x models reject it with 400 "does not support assistant message prefill". The shim rewrites system-role messages to user and merges adjacent user turns (`tool_result` blocks first).
     - Claude Code sends a `safeguards` field that Copilot's native endpoint rejects ("Extra inputs are not permitted"). On that 400 the shim drops the named top-level field and retries, and logs it.
-    - Copilot's Claude models accept different `thinking` settings: claude-sonnet-5.5 rejects `disabled` (wants `between_tools`), claude-opus-5.5 rejects `disabled`, and most reject `enabled` with a budget (want `adaptive`). On that 400 the shim rewrites `thinking` (or drops it), retries, and remembers the fix per model for the rest of the run. Auto mode's classifier asks for `disabled` on every check, so without this it fails. A rejected `adaptive` (claude-haiku-4.5) is passed through untouched, Claude Code retries without thinking by itself.
+    - Copilot's Claude models accept different `thinking` settings. On that 400 the shim rewrites `thinking` (or drops it), retries, and remembers the fix per model for the rest of the run. Auto mode's classifier asks for `disabled` on every check, so without this it fails. Known quirks:
+        - claude-sonnet-5.5 rejects `disabled` (wants `between_tools`).
+        - claude-opus-5.5 rejects `disabled`.
+        - Most reject `enabled` with a budget (want `adaptive`).
+        - A rejected `adaptive` (claude-haiku-4.5) is passed through untouched, Claude Code retries without thinking by itself.
     - `/v1/messages/count_tokens` is a rough estimate (request size in bytes / 4).
 - Model aliases (sonnet/opus/haiku/fable) are mapped to Copilot model IDs, since Anthropic's IDs don't exist on Copilot.
 - At startup the script asks the shim for the model list (chat models Copilot marks `model_picker_enabled`, so no embeddings, internal models, or the old gpt-3*/gpt-4* families) and passes it to `claude --settings` as a `modelPicker` list, so `/model` shows all of them. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
@@ -84,6 +88,14 @@ All env vars, all optional.
 | `COPILOT_SHIM_PORT` | unset (free port) | pin the shim to a fixed port. Only one run at a time can use it |
 | `COPILOT_TOKEN_FILE` | `~/.local/share/claude-copilot/github_token` | where the GitHub token is stored |
 
+Installer vars (only read by `install.sh` / `uninstall.sh`):
+
+| Var | Default | What |
+|---|---|---|
+| `INSTALL_DIR` | `~/.local/bin` | where the script is installed or removed from |
+| `CLAUDE_COPILOT_REF` | `main` | branch, tag or commit to install |
+| `KEEP_LOGIN` | unset | set to `1` to keep the saved token on uninstall |
+
 Files:
 
 - `$TMPDIR/claude-copilot.log`: shim log (errors, dropped fields, upstream status codes)
@@ -91,12 +103,12 @@ Files:
 
 ## Tested models
 
-Checked 2026-10-02 with Claude Code 2.1.286. Each model got a plain "reply ok" check and a Bash tool-call check, streaming, through the shim. Images were checked on one model per route (claude-sonnet-5.5, gpt-5.5, gemini-3.7-flash).
+**Last checked 2026-10-02 with Claude Code 2.1.286, results may be stale.** Each model got a plain "reply ok" check and a Bash tool-call check, streaming, through the shim. Images were checked on one model per route (claude-sonnet-5.5, gpt-5.5, gemini-3.7-flash).
 
 - **Work (all 24 in the picker):** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-4.5, gemini-3.7-flash, gemini-3.8-flash, gpt-5.3-codex, gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-5-mini, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, kimi-k2.7-code, kimi-k3, mai-code-1.1-flash
 - **Hidden from the picker** (Copilot doesn't mark them for the model picker, you can still pass them with `COPILOT_CLAUDE_MODEL`, they go through `/chat/completions`):
     - gpt-4, gpt-4-0613, gpt-4-0125-preview: work (checked 2026-10-02)
-    - gpt-4o*, gpt-4.1*, gpt-3.5-turbo*, gpt-4-o-preview: worked on 2026-10-01 with the old setup. On 2026-10-02 every call got 429 "exceeded your rate limit for utility models" (account-level limit after a burst of test requests), so not rechecked
+    - gpt-4o*, gpt-4.1*, gpt-3.5-turbo*, gpt-4-o-preview: untested. Every call got 429 "exceeded your rate limit for utility models" (account-level limit after a burst of test requests)
     - gpt-41-copilot: 400 model_not_supported
 
 Not tested: `auto`. The model list depends on your Copilot plan.
@@ -109,13 +121,13 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 - **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude. Thinking blocks and prompt-cache controls are not translated.
 - **`auto` model:** Copilot's auto-routing is done client-side by Copilot's own apps, the API doesn't expose it. Use Copilot CLI for that.
 - **Catalog warning:** Claude Code warns the model isn't in its catalog and assumes a 200k context. The script sets `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` to relax that.
-- **Auto mode:** works, but the safety checks run as Claude Code's own requests through Copilot (they count against your plan), not on Anthropic's server. The script sets `CLAUDE_CODE_AUTO_MODE_SERVER=0` because Copilot rejects the `safeguards` field the server-side checks need, and this also stops the "session isn't eligible" notice.
+- **Auto mode:** works, but the safety checks run as Claude Code's own requests through Copilot (they count against your plan), not on Anthropic's server. The script sets `CLAUDE_CODE_AUTO_MODE_SERVER=0` because Copilot rejects the `safeguards` field the server-side checks need, and this also stops the "session isn't eligible" notice. The classifier's `thinking: disabled` is handled by the shim, see "Fixes on the way".
 - **`claude --bare`** also avoids the system-message problem, but drops hooks and CLAUDE.md. The shim is the better fix.
 
 ## Troubleshooting
 
 - **Port busy:** you set `COPILOT_SHIM_PORT` and something else holds it. Unset it to get a free port.
-- **Leftover shim after `kill -9`:** `pkill -f "serve 0 "`. This kills the shims of any other running instances too.
+- **Leftover shim after `kill -9`:** list them with `pgrep -fl "serve 0 "`, then `kill <pid>` the orphaned one. Don't use `pkill -f` here, it would also kill the shims of any other running instances.
 - **"GitHub refused the Copilot token request":** the stored login is bad or the account has no Copilot access. Delete `~/.local/share/claude-copilot/github_token` and rerun.
 - **Shim didn't start:** check `$TMPDIR/claude-copilot.log`.
 - **400 `model_not_supported`:** the model ID doesn't exist on Copilot. `/model` only lists the ones that do.
@@ -124,11 +136,7 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 
 ## How the JetBrains Copilot plugin does the same
 
-Observed locally, plugin is closed source. Why this script runs its own local server instead of reusing the IDE's:
-
-- The IDE runs `copilot-language-server --stdio` (native binary in the plugin), which spawns your `claude` (path from Settings > GitHub Copilot > Chat > "Enable Claude Code CLI") through the Claude Agent SDK, speaking stream-json over stdin/stdout. Permission prompts go to the IDE UI.
-- The language server runs its own Anthropic-compatible local endpoint (`127.0.0.1:<random port>`, bearer token required) that forwards to Copilot, plus an MCP gateway exposing the IDE's `github` and `intellij` MCP servers.
-- The token is per session and unreadable from outside. A standalone `claude` against that endpoint worked only with that session's token, so it's a dead end for terminal use.
+Observed locally, plugin is closed source. Short version: the IDE's `copilot-language-server` spawns `claude` and runs its own Anthropic-compatible local endpoint (`127.0.0.1:<random port>`) that forwards to Copilot. The bearer token is per session and unreadable from outside, so a standalone `claude` can't reuse it. That's why this script runs its own shim.
 
 ## Credits
 
