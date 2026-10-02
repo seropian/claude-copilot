@@ -53,10 +53,10 @@ One small python server (embedded in the script) sits between Claude Code and Co
     - `/v1/messages` (Claude models): forwarded as is, Anthropic format.
     - `/responses` (GPT-5.x/6.x, Grok, MAI): translated from `/v1/messages` (text, tools, images, streaming).
     - `/chat/completions` (Gemini, Kimi, others): translated the same way.
-- **Fixes on the way:**
-    - Claude Code 2.1.x sends a trailing `role: "system"` message in `messages`, and Copilot's Claude 5.x models reject it with 400 "does not support assistant message prefill". The shim rewrites system-role messages to user and merges adjacent user turns (`tool_result` blocks first).
-    - Claude Code sends a `safeguards` field that Copilot's native endpoint rejects ("Extra inputs are not permitted"). On that 400 the shim drops the named field (top-level or nested, e.g. `cache_control.scope`) and retries (up to 5 times per request), and logs it. A path it can't find is passed through as the 400.
-    - Copilot's Claude models accept different `thinking` settings. On that 400 the shim rewrites `thinking` (or drops it), retries, and remembers the fix per model for the rest of the run. Auto mode's classifier asks for `disabled` on every check, so without this it fails. Known quirks:
+- **Request rewrites** (on the native `/v1/messages` route, so Copilot doesn't 400 on what Claude Code sends):
+    - System-role messages in `messages` are turned into user messages and adjacent user turns are merged (`tool_result` blocks first). Copilot's Claude 5.x models treat a trailing system message as assistant prefill and reject it.
+    - Fields Copilot rejects ("Extra inputs are not permitted", e.g. `safeguards`) are dropped on the 400, top-level or nested (like `cache_control.scope`), then the request is retried (up to 5 times) and logged. A path it can't find is passed through as the 400.
+    - `thinking` is rewritten (or dropped) on the 400 and retried, and the fix is remembered per model for the rest of the run. Models accept different settings, and auto mode's classifier always asks for `disabled`, so it'd fail without this. Known quirks:
         - claude-sonnet-5.5 rejects `disabled` (wants `between_tools`).
         - claude-opus-5.5 rejects `disabled`.
         - Most reject `enabled` with a budget (want `adaptive`).
@@ -121,7 +121,7 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 - **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude. Thinking blocks and prompt-cache controls are not translated.
 - **`auto` model:** Copilot's auto-routing is done client-side by Copilot's own apps, the API doesn't expose it. Use Copilot CLI for that.
 - **Catalog warning:** Claude Code warns the model isn't in its catalog and assumes a 200k context. The script sets `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` to relax that.
-- **Auto mode:** works, but the safety checks run as Claude Code's own requests through Copilot (they count against your plan), not on Anthropic's server. The script sets `CLAUDE_CODE_AUTO_MODE_SERVER=0` because Copilot rejects the `safeguards` field the server-side checks need, and this also stops the "session isn't eligible" notice. The classifier's `thinking: disabled` is handled by the shim, see "Fixes on the way".
+- **Auto mode:** works, but the safety checks run as Claude Code's own requests through Copilot (they count against your plan), not on Anthropic's server. The script sets `CLAUDE_CODE_AUTO_MODE_SERVER=0` because Copilot rejects the `safeguards` field the server-side checks need, and this also stops the "session isn't eligible" notice. The classifier's `thinking: disabled` is handled by the shim, see "Request rewrites".
 - **`claude --bare`** also avoids the system-message problem, but drops hooks and CLAUDE.md. The shim is the better fix.
 
 ## Troubleshooting
