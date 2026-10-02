@@ -777,11 +777,9 @@ class Auth(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
         self.tf = os.path.join(self.tmp, "sub", "github_token")
-        self.legacy = os.path.join(self.tmp, "legacy_token")
-        for name, val in (("TOKEN_FILE", self.tf), ("LEGACY_FILE", self.legacy)):
-            old = getattr(shim, name)
-            setattr(shim, name, val)
-            self.addCleanup(setattr, shim, name, old)
+        old = shim.TOKEN_FILE
+        shim.TOKEN_FILE = self.tf
+        self.addCleanup(setattr, shim, "TOKEN_FILE", old)
         # read_token's default arg was bound at definition time; rebind via wrapper
         orig = shim.read_token
         shim.read_token = lambda path=None: orig(self.tf if path is None else path)
@@ -804,12 +802,6 @@ class Auth(unittest.TestCase):
         shim.save_token("abc")
         shim.post_json = lambda *a: self.fail("should not hit network")
         self.assertEqual(shim.login(), 0)
-
-    def test_login_reuses_legacy(self):
-        with open(self.legacy, "w") as f: f.write("legacy-tok\n")
-        self.assertEqual(shim.login(), 0)
-        self.assertEqual(shim.read_token(), "legacy-tok")
-        self.assertTrue(any("copilot-api" in l for l in self.logs))
 
     def test_login_device_flow(self):
         replies = iter([

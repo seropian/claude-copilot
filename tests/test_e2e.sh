@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real e2e: real launcher, real shim, real `claude`, real GitHub Copilot. No fakes.
-# Needs a stored GitHub login (~/.local/share/claude-copilot or copilot-api) and `claude` on PATH.
+# Needs a stored GitHub login (~/.local/share/claude-copilot) and `claude` on PATH.
 # Skips (exit 0) when either is missing. Spends a few small Copilot requests per model.
 # Run: bash tests/test_e2e.sh
 # Models per route (override as needed): E2E_NATIVE, E2E_RESPONSES, E2E_CHAT. Missing ones are skipped.
@@ -18,7 +18,7 @@ skip() { skip=$((skip + 1)); echo "skip - $1"; }
 contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 
 if ! command -v claude >/dev/null 2>&1; then echo "skip - e2e: claude not on PATH"; exit 0; fi
-if [ ! -s "$HOME/.local/share/claude-copilot/github_token" ] && [ ! -s "$HOME/.local/share/copilot-api/github_token" ]; then
+if [ ! -s "$HOME/.local/share/claude-copilot/github_token" ]; then
   echo "skip - e2e: no GitHub login stored, run claude-copilot once first"; exit 0
 fi
 
