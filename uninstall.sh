@@ -4,7 +4,9 @@
 
 set -eu
 
-dest="${INSTALL_DIR:-$HOME/.local/bin}/claude-copilot"
+dir="${INSTALL_DIR:-$HOME/.local/bin}"
+case "$dir" in "~"|"~/"*) dir="$HOME${dir#\~}" ;; esac
+dest="$dir/claude-copilot"
 data="$HOME/.local/share/claude-copilot"
 
 if [ -e "$dest" ]; then rm -f "$dest" && echo "removed: $dest"; else echo "not found: $dest"; fi

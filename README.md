@@ -20,6 +20,14 @@ curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/instal
 
 Installs to `~/.local/bin/claude-copilot` (override with `INSTALL_DIR`). Rerun to update. Set `CLAUDE_COPILOT_REF` to pin a branch, tag or commit.
 
+## Uninstall
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/uninstall.sh | bash
+```
+
+Removes `~/.local/bin/claude-copilot` (or `INSTALL_DIR`), the saved login in `~/.local/share/claude-copilot`, and the log. Set `KEEP_LOGIN=1` to keep the token. Or by hand: `rm ~/.local/bin/claude-copilot; rm -rf ~/.local/share/claude-copilot`. Also remove the `PATH` line from your shell profile if you added it.
+
 ## Usage
 
 ```sh
