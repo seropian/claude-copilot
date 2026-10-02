@@ -18,4 +18,3 @@ elif [ -d "$data" ]; then
 fi
 
 rm -f "${TMPDIR:-/tmp}/claude-copilot.log"
-echo "note: ~/.local/share/copilot-api (if any) belongs to copilot-api, left alone."

@@ -10,7 +10,7 @@ One self-contained file: `claude-copilot.sh`. Works in bash 3.2+ (incl. macOS `/
 
 `python3` (3.6+), `curl`, `claude` (Claude Code). Run it from an interactive terminal (the first-run login needs one). No node, no npm packages. The script checks these on startup and tells you what's missing.
 
-First run asks for a GitHub device-code login (open the URL, type the code). The login is kept in `~/.local/share/claude-copilot/github_token` (mode 600). If you already logged in with copilot-api (`~/.local/share/copilot-api`), that token is reused.
+First run asks for a GitHub device-code login (open the URL, type the code). The login is kept in `~/.local/share/claude-copilot/github_token` (mode 600).
 
 ## Install
 
@@ -140,7 +140,7 @@ Observed locally, plugin is closed source. Short version: the IDE's `copilot-lan
 
 ## Credits
 
-Made by [Dikran Seropian](https://github.com/seropian). The device login flow and the Anthropic to chat-completions translation follow [copilot-api](https://github.com/ericc-ch/copilot-api) by ericc-ch (MIT), which earlier versions of this script ran as a gateway.
+Made by [Dikran Seropian](https://github.com/seropian). The script embeds its own device login flow and Anthropic-to-Copilot translation shim.
 
 ## License
 

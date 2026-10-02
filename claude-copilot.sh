@@ -42,7 +42,7 @@ claude-copilot() {
   local -a sa=()
 
   # Shim source (python). Usage: login | serve <port, 0 = any free> <file to write "pid port" to>.
-  # login: GitHub device-code login (or reuses a copilot-api login), token kept in ~/.local/share/claude-copilot.
+  # login: GitHub device-code login, token kept in ~/.local/share/claude-copilot.
   # serve: local Anthropic-style API in front of GitHub Copilot, see README, "How it works".
   local shim='
 import hmac, http.server, json, os, sys, threading, time, urllib.request, urllib.error, uuid
@@ -52,7 +52,6 @@ VSC, PLUG = "1.104.3", "0.26.7"
 BASE_H = {"editor-version": "vscode/" + VSC, "editor-plugin-version": "copilot-chat/" + PLUG,
           "user-agent": "GitHubCopilotChat/" + PLUG, "x-github-api-version": "2025-04-01"}
 TOKEN_FILE = os.path.expanduser(os.environ.get("COPILOT_TOKEN_FILE") or "~/.local/share/claude-copilot/github_token")
-LEGACY_FILE = os.path.expanduser("~/.local/share/copilot-api/github_token")
 KEY = os.environ.get("COPILOT_SHIM_KEY", "")
 MAX_BODY = 64 * 1024 * 1024
 def log(msg): sys.stderr.write(msg + "\n"); sys.stderr.flush()
@@ -72,9 +71,6 @@ def post_json(url, body):
     except urllib.error.HTTPError as e: return json.loads(e.read() or b"{}")
 def login():
     if read_token(): return 0
-    t = read_token(LEGACY_FILE)
-    if t:
-        save_token(t); log("claude-copilot: reusing the GitHub login from copilot-api"); return 0
     d = post_json(GH + "/login/device/code", {"client_id": CLIENT_ID, "scope": "read:user"})
     if "device_code" not in d: log("claude-copilot: device login failed: %r" % d); return 1
     log("claude-copilot: open %s and enter the code %s" % (d["verification_uri"], d["user_code"]))
