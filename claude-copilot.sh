@@ -157,6 +157,20 @@ def fix(j):
     j["messages"] = out
     return j
 def err(msg): return {"type": "error", "error": {"type": "api_error", "message": msg}}
+def drop_path(j, path):
+    """Delete the field a Copilot "a.0.b.c: Extra inputs..." path points at. Copilot inserts type names
+    into the path (tools.0.custom.x, cache_control.ephemeral.x), so a segment that is not a container is skipped."""
+    segs = path.split("."); cur = j
+    for i, s in enumerate(segs):
+        last = i == len(segs) - 1
+        if isinstance(cur, dict) and s in cur:
+            if last: del cur[s]; return True
+            if isinstance(cur[s], (dict, list)): cur = cur[s]
+        elif isinstance(cur, list) and s.isdigit() and int(s) < len(cur):
+            if last: return False
+            cur = cur[int(s)]
+        elif last: return False
+    return False
 THINK = {}
 def thinking_fix(m):
     """Map a Copilot 400 about the thinking setting to a replacement (None = drop it), or False."""
@@ -287,6 +301,17 @@ def sse_events(r):
 def estimate(nbytes):
     return {"input_tokens": max(1, nbytes // 4)}
 
+def count_tokens(j, raw_len, extra):
+    """Real count from the Copilot native endpoint; the byte estimate for other routes or on any failure."""
+    try:
+        if "/v1/messages" in endpoints(j.get("model")):
+            r = cp_open("/v1/messages/count_tokens", j, False, has_image(j), False, extra)
+            n = json.load(r).get("input_tokens")
+            if isinstance(n, int): return {"input_tokens": n}
+    except Exception as e:
+        log("shim: count_tokens fell back to estimate (%r)" % e)
+    return estimate(raw_len)
+
 class H(http.server.BaseHTTPRequestHandler):
     def sse(self, ev, **d):
         self.wfile.write(("event: %s\ndata: %s\n\n" % (ev, json.dumps({"type": ev, **d}))).encode()); self.wfile.flush()
@@ -393,8 +418,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 try: obj = json.loads(data); m = obj["error"]["message"]
                 except Exception: obj, m = err(data.decode(errors="replace")), ""
                 key = m.split(":")[0]
-                if e.code == 400 and m.endswith("Extra inputs are not permitted") and key in j:
-                    log("shim: dropping field %s, Copilot rejects it" % key); del j[key]; continue
+                if e.code == 400 and m.endswith("Extra inputs are not permitted") and drop_path(j, key):
+                    log("shim: dropping field %s, Copilot rejects it" % key); continue
                 new = thinking_fix(m) if e.code == 400 and isinstance(j.get("thinking"), dict) else False
                 if new is not False:
                     THINK[(j["model"], j["thinking"].get("type"))] = new
@@ -441,7 +466,9 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(400, err("bad request body: %r" % e))
         p = self.path.split("?")[0]
         try:
-            if p == "/v1/messages/count_tokens": return self.reply(200, estimate(len(raw)))
+            if p == "/v1/messages/count_tokens":
+                extra = {k: self.headers[k] for k in ("anthropic-version", "anthropic-beta") if self.headers.get(k)}
+                return self.reply(200, count_tokens(j, len(raw), extra))
             if p != "/v1/messages": return self.reply(404, err("not found: " + p))
             eps = endpoints(j.get("model"))
             if "/v1/messages" in eps: return self.native(j)

@@ -55,13 +55,13 @@ One small python server (embedded in the script) sits between Claude Code and Co
     - `/chat/completions` (Gemini, Kimi, others): translated the same way.
 - **Fixes on the way:**
     - Claude Code 2.1.x sends a trailing `role: "system"` message in `messages`, and Copilot's Claude 5.x models reject it with 400 "does not support assistant message prefill". The shim rewrites system-role messages to user and merges adjacent user turns (`tool_result` blocks first).
-    - Claude Code sends a `safeguards` field that Copilot's native endpoint rejects ("Extra inputs are not permitted"). On that 400 the shim drops the named top-level field and retries, and logs it.
+    - Claude Code sends a `safeguards` field that Copilot's native endpoint rejects ("Extra inputs are not permitted"). On that 400 the shim drops the named field (top-level or nested, e.g. `cache_control.scope`) and retries (up to 5 times per request), and logs it. A path it can't find is passed through as the 400.
     - Copilot's Claude models accept different `thinking` settings. On that 400 the shim rewrites `thinking` (or drops it), retries, and remembers the fix per model for the rest of the run. Auto mode's classifier asks for `disabled` on every check, so without this it fails. Known quirks:
         - claude-sonnet-5.5 rejects `disabled` (wants `between_tools`).
         - claude-opus-5.5 rejects `disabled`.
         - Most reject `enabled` with a budget (want `adaptive`).
         - A rejected `adaptive` (claude-haiku-4.5) is passed through untouched, Claude Code retries without thinking by itself.
-    - `/v1/messages/count_tokens` is a rough estimate (request size in bytes / 4).
+    - `/v1/messages/count_tokens` is forwarded to Copilot for models on its native endpoint, which returns a real count. Other models, or any failure, get a rough estimate (request size in bytes / 4).
 - Model aliases (sonnet/opus/haiku/fable) are mapped to Copilot model IDs, since Anthropic's IDs don't exist on Copilot.
 - At startup the script asks the shim for the model list (chat models Copilot marks `model_picker_enabled`, so no embeddings, internal models, or the old gpt-3*/gpt-4* families) and passes it to `claude --settings` as a `modelPicker` list, so `/model` shows all of them. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
 
@@ -132,7 +132,7 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 - **Shim didn't start:** check `$TMPDIR/claude-copilot.log`.
 - **400 `model_not_supported`:** the model ID doesn't exist on Copilot. `/model` only lists the ones that do.
 - **400 "prefill" on a Claude 5.x model:** the request shape changed. Look at the log.
-- **400 "Extra inputs are not permitted" showing up for the client:** the field is nested (the shim only drops top-level ones). Look at the log for the field name.
+- **400 "Extra inputs are not permitted" showing up for the client:** the shim couldn't find the field Copilot named, or hit the 5-retry cap. Look at the log for the field name.
 
 ## How the JetBrains Copilot plugin does the same
 
