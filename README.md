@@ -1,26 +1,24 @@
 # claude-copilot
 
+![Screenshot](docs/images/screenshot1.png)
+
 Run Claude Code on GitHub Copilot models. No Anthropic account needed, just a Copilot plan.
 
 One self-contained file: `claude-copilot.sh`. Works in bash 3.2+ (incl. macOS `/bin/bash`) and zsh. Not POSIX sh.
 
 ## Requirements
 
-`node`/`npx`, `python3`, `nc`, `lsof`, `claude`. Run it from a normal terminal.
+`python3` (3.6+), `curl`, `claude` (Claude Code). Run it from a normal terminal. No node, no npm packages. The script checks these on startup and tells you what's missing.
 
-First run asks for a GitHub device-code login (open the URL, type the code). The login is cached in `~/.local/share/copilot-api`.
+First run asks for a GitHub device-code login (open the URL, type the code). The login is kept in `~/.local/share/claude-copilot/github_token` (mode 600). If you already logged in with copilot-api (`~/.local/share/copilot-api`), that token is reused.
 
 ## Install
-
-Put it on PATH and run it as a command:
-
-Install it straight from GitHub:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/install.sh | bash
 ```
 
-Installs to `~/.local/bin/claude-copilot`. Rerun to update.
+Installs to `~/.local/bin/claude-copilot` (override with `INSTALL_DIR`). Rerun to update. Set `CLAUDE_COPILOT_REF` to pin a branch, tag or commit.
 
 ## Usage
 
@@ -36,23 +34,33 @@ All args go straight to `claude`. Exit code is passed through.
 ## How it works
 
 ```
-claude -> shim (python, :4142) -> copilot-api (npx, :4141) -> GitHub Copilot
+claude -> shim (python, 127.0.0.1:<free port>) -> GitHub Copilot API
 ```
 
-- Claude Code is pointed at a local server via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (the token is ignored locally). Env is scoped to the one `claude` command, your shell stays clean.
-- [copilot-api](https://github.com/ericc-ch/copilot-api) turns Anthropic/OpenAI requests into Copilot requests using your GitHub login. Pinned to `0.7.0`, since it sees your GitHub token.
-- The shim fixes one incompatibility: Claude Code 2.1.x sends a trailing `role: "system"` message in `messages`, and Copilot's Claude 5.x models reject it with 400 "does not support assistant message prefill". The shim rewrites system-role messages to user and merges adjacent user turns (`tool_result` blocks first). Everything else, incl. streaming, passes through.
+One small python server (embedded in the script) sits between Claude Code and Copilot. There is no other gateway process.
+
+- Claude Code is pointed at the shim via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (a random per-run key; the shim rejects requests without it, and any `Host` header that isn't localhost, so other local processes and web pages can't spend your Copilot quota). Env is scoped to the one `claude` command, your shell stays clean. The shim only listens on `127.0.0.1`.
+- **Auth:** GitHub device-code login with the VS Code Copilot client id, then the shim trades the GitHub token for a short-lived Copilot token (`/copilot_internal/v2/token`) and refreshes it before it expires. The API host comes from that token response, so business/enterprise accounts work too.
+- **Routing:** per model, the shim reads `supported_endpoints` from Copilot's `/models` (cached 5 min) and picks:
+    - `/v1/messages` (Claude models): forwarded as is, Anthropic format.
+    - `/responses` (GPT-5.x/6.x, Grok, MAI): translated from `/v1/messages` (text, tools, images, streaming).
+    - `/chat/completions` (Gemini, Kimi, others): translated the same way.
+- **Fixes on the way:**
+    - Claude Code 2.1.x sends a trailing `role: "system"` message in `messages`, and Copilot's Claude 5.x models reject it with 400 "does not support assistant message prefill". The shim rewrites system-role messages to user and merges adjacent user turns (`tool_result` blocks first).
+    - Claude Code sends a `safeguards` field that Copilot's native endpoint rejects ("Extra inputs are not permitted"). On that 400 the shim drops the named top-level field and retries, and logs it.
+    - Copilot's Claude models accept different `thinking` settings: claude-sonnet-5.5 rejects `disabled` (wants `between_tools`), claude-opus-5.5 rejects `disabled`, and most reject `enabled` with a budget (want `adaptive`). On that 400 the shim rewrites `thinking` (or drops it), retries, and remembers the fix per model for the rest of the run. Auto mode's classifier asks for `disabled` on every check, so without this it fails. A rejected `adaptive` (claude-haiku-4.5) is passed through untouched, Claude Code retries without thinking by itself.
+    - `/v1/messages/count_tokens` is a rough estimate (request size in bytes / 4).
 - Model aliases (sonnet/opus/haiku/fable) are mapped to Copilot model IDs, since Anthropic's IDs don't exist on Copilot.
-- At startup the script reads `/v1/models` (every model your Copilot plan offers, minus embeddings) and passes them to `claude --settings` as a `modelPicker` list, so `/model` shows all of them. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it. The picker can't tell which models actually work (see "Tested models"), and rate-limited ones (429) will just hang until Claude Code gives up.
+- At startup the script asks the shim for the model list (chat models Copilot marks `model_picker_enabled`, so no embeddings, internal models, or the old gpt-3*/gpt-4* families) and passes it to `claude --settings` as a `modelPicker` list, so `/model` shows all of them. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
 
 Lifecycle:
 
-1. Start the gateway only if `:4141` is closed (waits up to 3 min, for the login). Bails fast if the gateway process dies.
+1. Log in if there's no stored token.
 2. Start the shim. Bails if its port is taken.
 3. Run `claude`.
-4. Cleanup: kill the shim. Kill the gateway only if this script started it and no other run is using it. HUP/TERM/INT clean up too.
+4. Cleanup: kill the shim. HUP/TERM/INT clean up too.
 
-Parallel runs work: use a different `COPILOT_SHIM_PORT` for each. They share one gateway, the last run out kills it.
+Run as many instances in parallel as you like. Each run starts its own shim on a free port picked by the OS, so there's nothing to configure.
 
 ## Config
 
@@ -65,60 +73,50 @@ All env vars, all optional.
 | `COPILOT_OPUS_MODEL` | `claude-opus-5.5` | `opus` alias target |
 | `COPILOT_FABLE_MODEL` | `claude-opus-5.5` | `fable` alias target. Copilot has no Fable model, so picking it really gives you whatever this points to |
 | `COPILOT_HAIKU_MODEL` | `claude-haiku-4.5` | `haiku` alias target |
-| `COPILOT_API_PORT` | `4141` | gateway port |
-| `COPILOT_SHIM_PORT` | `4142` | shim port, unique per parallel run |
-| `COPILOT_API_CMD` | `npx copilot-api@0.7.0 start --port $COPILOT_API_PORT` | gateway start command |
+| `COPILOT_SHIM_PORT` | unset (free port) | pin the shim to a fixed port. Only one run at a time can use it |
+| `COPILOT_TOKEN_FILE` | `~/.local/share/claude-copilot/github_token` | where the GitHub token is stored |
 
 Files:
 
-- `$TMPDIR/copilot-api.log`: gateway + shim log
-- `$TMPDIR/claude-copilot.<port>.run` / `.pid`: run markers and gateway PID, used for the last-one-out cleanup
+- `$TMPDIR/claude-copilot.log`: shim log (errors, dropped fields, upstream status codes)
+- `~/.local/share/claude-copilot/github_token`: your GitHub token. Delete it to log in again.
 
 ## Tested models
 
-Checked 2026-10-01 with copilot-api 0.7.0 and Claude Code 2.1.286. Each model got a plain "reply ok" check and a Bash tool-call check.
+Checked 2026-10-02 with Claude Code 2.1.286. Each model got a plain "reply ok" check and a Bash tool-call check, streaming, through the shim. Images were checked on one model per route (claude-sonnet-5.5, gpt-5.5, gemini-3.7-flash).
 
-- **Work:** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-4.5, gemini-3.7-flash, gemini-3.8-flash, kimi-k3, gpt-5-mini, gpt-4.1, gpt-4o, gpt-4o-mini, gpt-4, gpt-3.5-turbo
-- **Partial:** kimi-k2.7-code. Plain ok, tool test failed (said the command ran, never reported the output).
-- **Fail:**
-    - gpt-5.3-codex, gpt-5.4-mini, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, mai-code-1.1-flash: 400 "not accessible via the /chat/completions endpoint" (Copilot serves them only on `/responses`)
-    - gpt-5.4: 400 Bad Request, cause unknown
+- **Work (all 24 in the picker):** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-4.5, gemini-3.7-flash, gemini-3.8-flash, gpt-5.3-codex, gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-5-mini, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, kimi-k2.7-code, kimi-k3, mai-code-1.1-flash
+- **Hidden from the picker** (Copilot doesn't mark them for the model picker, you can still pass them with `COPILOT_CLAUDE_MODEL`, they go through `/chat/completions`):
+    - gpt-4, gpt-4-0613, gpt-4-0125-preview: work (checked 2026-10-02)
+    - gpt-4o*, gpt-4.1*, gpt-3.5-turbo*, gpt-4-o-preview: worked on 2026-10-01 with the old setup. On 2026-10-02 every call got 429 "exceeded your rate limit for utility models" (account-level limit after a burst of test requests), so not rechecked
     - gpt-41-copilot: 400 model_not_supported
 
-Not tested: embeddings, trajectory-compaction (not chat models), `auto`. The model list depends on your Copilot plan: see "Available models" in the gateway output at startup, or `curl localhost:4141/v1/models`.
+Not tested: `auto`. The model list depends on your Copilot plan.
 
 ## Known issues / limits
 
-- **Security:** copilot-api listens on all interfaces. While it runs, other machines on your network could use your Copilot session. Trusted networks only.
-- **Unofficial:** copilot-api is a reverse-engineered proxy. It may break when GitHub changes things, and may be against GitHub's terms. Your call.
+- **Unofficial:** this uses GitHub's private Copilot endpoints, with the VS Code Copilot client id and headers. It may break when GitHub changes things, and may be against GitHub's terms. Your call.
 - **Billing:** premium requests count against your Copilot plan.
-- **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude.
-- **`auto` model:** Copilot's auto-routing is done client-side by Copilot's own apps. copilot-api doesn't list or route it. Use Copilot CLI for that.
-- **Catalog warning:** Claude Code warns the model isn't in its catalog and assumes a 200k context. The script sets `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` to relax that. Auto-mode classifier billing note is harmless.
+- **Rate limits:** Copilot rate-limits per account and model tier (the small "utility" models like gpt-4o-mini hit it first). On a 429 Claude Code retries until it gives up, so it looks like a hang. Look for `429` in `$TMPDIR/claude-copilot.log`, wait it out.
+- **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude. Thinking blocks and prompt-cache controls are not translated.
+- **`auto` model:** Copilot's auto-routing is done client-side by Copilot's own apps, the API doesn't expose it. Use Copilot CLI for that.
+- **Catalog warning:** Claude Code warns the model isn't in its catalog and assumes a 200k context. The script sets `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` to relax that.
+- **Auto mode:** works, but the safety checks run as Claude Code's own requests through Copilot (they count against your plan), not on Anthropic's server. The script sets `CLAUDE_CODE_AUTO_MODE_SERVER=0` because Copilot rejects the `safeguards` field the server-side checks need, and this also stops the "session isn't eligible" notice.
 - **`claude --bare`** also avoids the system-message problem, but drops hooks and CLAUDE.md. The shim is the better fix.
-- **Reused gateway:** if `:4141` is already open, the script assumes it's copilot-api and doesn't check.
 
 ## Troubleshooting
 
-- **Port busy:** set `COPILOT_SHIM_PORT` (or `COPILOT_API_PORT`).
-- **Leftover processes after `kill -9`:**
-  ```sh
-  lsof -ti tcp:4141 -sTCP:LISTEN | xargs kill
-  lsof -ti tcp:4142 -sTCP:LISTEN | xargs kill
-  ```
-- **Gateway didn't come up:** check `$TMPDIR/copilot-api.log`.
-- **400 `model_not_supported`:** the model ID doesn't exist on Copilot. Check `/v1/models`.
-- **400 "prefill" on a Claude 5.x model:** the shim isn't in the path, or the request shape changed. Look at the log.
-
-## Upgrade path (not done on purpose)
-
-- npm `copilot-api` is stuck at 0.7.0 (last published 2025-10-05).
-- Upstream PR [ericc-ch/copilot-api#274](https://github.com/ericc-ch/copilot-api/pull/274) adds `/responses` translation for the failing GPT-5.x/6 models. Open and unmerged as of 2026-10-01.
-- npm forks that claim `/responses` support: `@jeffreycao/copilot-api`, `xiaodcs-copilot-api`, `@dianshuv/copilot-api`, `copilot-api-plus`, `copilot-api-node20`. **Not vetted.** The gateway sees your GitHub token, so read the code and `npm view <pkg> scripts` first. To try one: set `COPILOT_API_CMD`, rerun the model tests, see if the shim is still needed.
+- **Port busy:** you set `COPILOT_SHIM_PORT` and something else holds it. Unset it to get a free port.
+- **Leftover shim after `kill -9`:** `pkill -f "serve 0 "`. This kills the shims of any other running instances too.
+- **"GitHub refused the Copilot token request":** the stored login is bad or the account has no Copilot access. Delete `~/.local/share/claude-copilot/github_token` and rerun.
+- **Shim didn't start:** check `$TMPDIR/claude-copilot.log`.
+- **400 `model_not_supported`:** the model ID doesn't exist on Copilot. `/model` only lists the ones that do.
+- **400 "prefill" on a Claude 5.x model:** the request shape changed. Look at the log.
+- **400 "Extra inputs are not permitted" showing up for the client:** the field is nested (the shim only drops top-level ones). Look at the log for the field name.
 
 ## How the JetBrains Copilot plugin does the same
 
-Observed locally, plugin is closed source. Why this script runs its own gateway instead of reusing the IDE's:
+Observed locally, plugin is closed source. Why this script runs its own local server instead of reusing the IDE's:
 
 - The IDE runs `copilot-language-server --stdio` (native binary in the plugin), which spawns your `claude` (path from Settings > GitHub Copilot > Chat > "Enable Claude Code CLI") through the Claude Agent SDK, speaking stream-json over stdin/stdout. Permission prompts go to the IDE UI.
 - The language server runs its own Anthropic-compatible local endpoint (`127.0.0.1:<random port>`, bearer token required) that forwards to Copilot, plus an MCP gateway exposing the IDE's `github` and `intellij` MCP servers.
@@ -126,7 +124,7 @@ Observed locally, plugin is closed source. Why this script runs its own gateway 
 
 ## Credits
 
-Made by [Dikran Seropian](https://github.com/seropian). Built on [copilot-api](https://github.com/ericc-ch/copilot-api) by ericc-ch.
+Made by [Dikran Seropian](https://github.com/seropian). The device login flow and the Anthropic to chat-completions translation follow [copilot-api](https://github.com/ericc-ch/copilot-api) by ericc-ch (MIT), which earlier versions of this script ran as a gateway.
 
 ## License
 

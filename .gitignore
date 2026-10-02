@@ -13,3 +13,6 @@
 # Logs / temp
 *.log
 *.tmp
+
+# Python
+__pycache__/
