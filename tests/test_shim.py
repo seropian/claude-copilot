@@ -342,6 +342,32 @@ class Server(Base):
         self.assertEqual(s, 200)
         self.assertGreater(json.loads(data)["input_tokens"], 90)
 
+    def test_count_tokens_native_uses_copilot(self):
+        self.models(model_entry("claude-x", ["/v1/messages"]))
+        seen_bodies = []
+
+        def route(seen):
+            seen_bodies.append(seen["body"])
+            return 200, "application/json", b'{"input_tokens": 16}'
+
+        self.up.routes["/v1/messages/count_tokens"] = route
+        s, data, _ = self.post({"model": "claude-x", "messages": [{"role": "user", "content": "x" * 400}]}, "/v1/messages/count_tokens")
+        self.assertEqual((s, json.loads(data)), (200, {"input_tokens": 16}))
+        self.assertEqual(seen_bodies[0]["model"], "claude-x")
+
+    def test_count_tokens_native_failure_falls_back_to_estimate(self):
+        self.models(model_entry("claude-x", ["/v1/messages"]))
+        self.up.routes["/v1/messages/count_tokens"] = lambda seen: (400, "application/json", b'{"error": {"message": "nope"}}')
+        s, data, _ = self.post({"model": "claude-x", "messages": [{"role": "user", "content": "x" * 400}]}, "/v1/messages/count_tokens")
+        self.assertEqual(s, 200)
+        self.assertGreater(json.loads(data)["input_tokens"], 90)
+
+    def test_count_tokens_non_native_model_is_estimated_locally(self):
+        self.models(model_entry("gpt-x", ["/responses"]))
+        s, data, _ = self.post({"model": "gpt-x", "messages": [{"role": "user", "content": "x" * 400}]}, "/v1/messages/count_tokens")
+        self.assertEqual(s, 200)
+        self.assertGreater(json.loads(data)["input_tokens"], 90)
+
     def test_unknown_post_path(self):
         s, data, _ = self.post({"messages": []}, "/nope")
         self.assertEqual(s, 404)
@@ -443,6 +469,76 @@ class Server(Base):
         self.assertEqual(s, 200)
         self.assertEqual(len(calls), 2)
         self.assertNotIn("context_management", calls[1])
+
+    def test_native_system_role_rewritten_before_upstream(self):
+        self.models(model_entry("claude-x", ["/v1/messages"]))
+        seen_bodies = []
+
+        def route(seen):
+            seen_bodies.append(seen["body"])
+            return 200, "application/json", b'{"ok": true}'
+
+        self.up.routes["/v1/messages"] = route
+        s, _, _ = self.post({"model": "claude-x", "messages": [
+            {"role": "user", "content": "hi"}, {"role": "system", "content": "reminder"}]})
+        self.assertEqual(s, 200)
+        msgs = seen_bodies[0]["messages"]
+        self.assertEqual([m["role"] for m in msgs], ["user"])
+        self.assertEqual(len(msgs[0]["content"]), 2)
+
+    def test_native_field_rejection_loop_is_bounded(self):
+        self.models(model_entry("claude-x", ["/v1/messages"]))
+        calls = []
+
+        def route(seen):
+            calls.append(1)
+            return 400, "application/json", json.dumps({"error": {"message": "f%d: Extra inputs are not permitted" % len(calls)}}).encode()
+
+        self.up.routes["/v1/messages"] = route
+        body = {"model": "claude-x", "messages": [{"role": "user", "content": "x"}]}
+        body.update({"f%d" % i: 1 for i in range(1, 10)})
+        s, data, _ = self.post(body)
+        self.assertEqual(s, 502)
+        self.assertEqual(len(calls), 5)
+
+    def _reject_paths(self, body, paths):
+        """Upstream that rejects each path in `paths` while its field is still present; returns recorded bodies."""
+        self.models(model_entry("claude-x", ["/v1/messages"]))
+        calls = []
+
+        def route(seen):
+            calls.append(json.loads(json.dumps(seen["body"])))
+            for path, present in paths:
+                if present(seen["body"]):
+                    return 400, "application/json", json.dumps({"error": {"message": path + ": Extra inputs are not permitted"}}).encode()
+            return 200, "application/json", b'{"ok": true}'
+
+        self.up.routes["/v1/messages"] = route
+        return calls, self.post({"model": "claude-x", "max_tokens": 5, **body})[0]
+
+    def test_native_drops_nested_rejected_fields(self):
+        calls, s = self._reject_paths({
+            "metadata": {"user_id": "u", "bogus": 1},
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi", "bogus": 1}]}],
+            "tools": [{"name": "t", "input_schema": {"type": "object"}, "bogus": 1}],
+            "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral", "scope": "global"}}],
+        }, [
+            ("metadata.bogus", lambda b: "bogus" in b["metadata"]),
+            ("messages.0.content.0.text.bogus", lambda b: "bogus" in b["messages"][0]["content"][0]),
+            ("tools.0.custom.bogus", lambda b: "bogus" in b["tools"][0]),
+            ("system.0.cache_control.ephemeral.scope", lambda b: "scope" in b["system"][0]["cache_control"]),
+        ])
+        self.assertEqual(s, 200)
+        last = calls[-1]
+        self.assertEqual(last["metadata"], {"user_id": "u"})
+        self.assertEqual(last["messages"][0]["content"][0], {"type": "text", "text": "hi"})
+        self.assertEqual(last["tools"][0], {"name": "t", "input_schema": {"type": "object"}})
+        self.assertEqual(last["system"][0]["cache_control"], {"type": "ephemeral"})
+
+    def test_native_unresolvable_rejected_path_passes_through(self):
+        calls, s = self._reject_paths({"metadata": {"a": 1}}, [("metadata.nope.zzz", lambda b: True)])
+        self.assertEqual(s, 400)
+        self.assertEqual(len(calls), 1)
 
     def _thinking_route(self, reject):
         """Upstream /v1/messages that 400s with `reject(thinking)` (a message or None) and records bodies."""
