@@ -255,10 +255,7 @@ contains "$out" "run: claude-copilot"; check "install.sh prints how to run" $?
 
 env -i HOME="$IN/home" PATH="$IN/bin:/usr/bin:/bin" CLAUDE_COPILOT_VERSION=9.0.0 INSTALL_DIR="$IN/custom" /bin/bash "$INSTALL" >/dev/null 2>&1
 [ -x "$IN/custom/claude-copilot" ]; check "INSTALL_DIR is honored" $?
-contains "$(cat "$IN/curl.args")" "/seropian/claude-copilot/releases/download/v9.0.0/claude-copilot.sh"; check "CLAUDE_COPILOT_VERSION is honored" $?
-
-out=$(env -i HOME="$IN/home" PATH="$IN/bin:/usr/bin:/bin" CLAUDE_COPILOT_VERSION='x?y' /bin/bash "$INSTALL" 2>&1); rc=$?
-[ "$rc" -eq 1 ] && contains "$out" "CLAUDE_COPILOT_VERSION"; check "install.sh refuses an invalid version" $?
+contains "$(cat "$IN/curl.args")" "github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh"; check "installer always downloads the latest release" $?
 
 out=$(env -i HOME="$IN/home" PATH="$IN/custom:$IN/bin:/usr/bin:/bin" INSTALL_DIR="$IN/custom" /bin/bash "$INSTALL" 2>&1)
 contains "$out" "isn't on your PATH"; [ $? -ne 0 ]; check "install.sh stays quiet about PATH when dir is on it" $?
@@ -291,9 +288,7 @@ done
 [ "$(ls -A "$IN/bad/bin")" = claude-copilot ]; check "bad download leaves no temp file" $?
 mv "$IN/bin/curl.good" "$IN/bin/curl"
 
-# invalid versions are refused, ~ in INSTALL_DIR is expanded, existing install is replaced
-out=$(env -i HOME="$IN/home" PATH="$IN/bin:/usr/bin:/bin" CLAUDE_COPILOT_VERSION='x?y#z' /bin/bash "$INSTALL" 2>&1); rc=$?
-[ "$rc" -eq 1 ] && contains "$out" "CLAUDE_COPILOT_VERSION"; check "install.sh refuses a weird version" $?
+# ~ in INSTALL_DIR is expanded, existing install is replaced
 env -i HOME="$IN/tilde" PATH="$IN/bin:/usr/bin:/bin" INSTALL_DIR='~/bin' /bin/bash "$INSTALL" >/dev/null 2>&1
 [ -x "$IN/tilde/bin/claude-copilot" ] && [ ! -e "$PWD/~" ]; check "install.sh expands ~ in INSTALL_DIR" $?
 echo old > "$IN/home/.local/bin/claude-copilot"
