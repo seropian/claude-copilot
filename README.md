@@ -20,14 +20,7 @@ First run asks for a GitHub device-code login (open the URL, type the code). The
 curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/install.sh | bash
 ```
 
-Install a pinned release:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/install.sh \
-  | CLAUDE_COPILOT_VERSION=0.1.0 bash
-```
-
-Installs the latest GitHub Release to `~/.local/bin/claude-copilot` (override with `INSTALL_DIR`). Rerun to update. Set `CLAUDE_COPILOT_VERSION` to pin a release. Development branch installs are not supported because the generated artifact is intentionally not committed; build locally with `make build` instead. Want to read it first? Download `install.sh` and run it yourself.
+The installer always installs the latest GitHub Release to `~/.local/bin/claude-copilot` (override with `INSTALL_DIR`). Rerun to update. Development branch installs are not supported because the generated artifact is intentionally not committed; build locally with `make build` instead. Want to read it first? Download `install.sh` and run it yourself.
 
 Release assets are available at:
 
