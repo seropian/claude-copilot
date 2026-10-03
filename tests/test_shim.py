@@ -17,16 +17,28 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_shim():
-    manifest = os.path.join(ROOT, "src", "shim", "MANIFEST")
-    files = [line.strip() for line in open(manifest) if line.strip()]
-    source = "\n".join(open(os.path.join(ROOT, name)).read().rstrip("\n") for name in files) + "\n"
-    mod = types.ModuleType("shim")
-    old = sys.argv
-    sys.argv = ["shim", "test"]  # neither login nor serve
-    try:
-        exec(compile(source, "shim", "exec"), mod.__dict__)
-    finally:
-        sys.argv = old
+    sys.path.insert(0, os.path.join(ROOT, "src"))
+    from claude_copilot_shim import auth, config, helpers, models, server, stream, transforms
+    modules = (config, auth, models, helpers, transforms, stream, server)
+
+    class ShimFacade:
+        def __getattr__(self, name):
+            for source in modules:
+                if hasattr(source, name):
+                    return getattr(source, name)
+            raise AttributeError(name)
+
+        def __setattr__(self, name, value):
+            found = False
+            for source in modules:
+                if hasattr(source, name):
+                    setattr(source, name, value)
+                    found = True
+            if not found:
+                object.__setattr__(self, name, value)
+
+    mod = ShimFacade()
+    mod.H = server.CopilotRequestHandler
     return mod
 
 
@@ -42,9 +54,16 @@ shim = load_shim()
 
 class BuildArtifact(unittest.TestCase):
     def test_artifact_embeds_source_exactly(self):
-        manifest = [line.strip() for line in open(os.path.join(ROOT, "src", "shim", "MANIFEST")) if line.strip()]
-        source = "\n".join(open(os.path.join(ROOT, name)).read().rstrip("\n") for name in manifest) + "\n"
-        self.assertEqual(load_artifact_shim(), source)
+        import build
+        self.assertEqual(load_artifact_shim(), build.read_shim())
+
+    def test_package_imports_without_filename_order(self):
+        import importlib
+        sys.path.insert(0, os.path.join(ROOT, "src"))
+        names = ["config", "auth", "models", "helpers", "transforms", "stream", "server", "cli"]
+        for name in reversed(names):
+            importlib.import_module("claude_copilot_shim." + name)
+        self.assertEqual(shim.H.__name__, "CopilotRequestHandler")
 
     def test_artifact_is_valid_shell(self):
         self.assertTrue(os.access(os.path.join(ROOT, "dist", "claude-copilot.sh"), os.X_OK))
@@ -803,6 +822,9 @@ class Auth(unittest.TestCase):
         shim.read_token = lambda path=None: orig(self.tf if path is None else path)
         self.addCleanup(setattr, shim, "read_token", orig)
         self.logs = []
+        old_stdin = sys.stdin
+        sys.stdin = type("TerminalStdin", (), {"isatty": lambda self: True})()
+        self.addCleanup(setattr, sys, "stdin", old_stdin)
         olog = shim.log
         shim.log = self.logs.append
         self.addCleanup(setattr, shim, "log", olog)
@@ -821,7 +843,17 @@ class Auth(unittest.TestCase):
         shim.post_json = lambda *a: self.fail("should not hit network")
         self.assertEqual(shim.login(), 0)
 
+    def test_login_without_token_fails_noninteractive(self):
+        old_stdin = sys.stdin
+        sys.stdin = type("ClosedStdin", (), {"isatty": lambda self: False})()
+        self.addCleanup(setattr, sys, "stdin", old_stdin)
+        self.assertEqual(shim.login(), 1)
+        self.assertTrue(any("not interactive" in line for line in self.logs))
+
     def test_login_device_flow(self):
+        old_stdin = sys.stdin
+        sys.stdin = type("TerminalStdin", (), {"isatty": lambda self: True})()
+        self.addCleanup(setattr, sys, "stdin", old_stdin)
         replies = iter([
             {"device_code": "dc", "user_code": "ABCD-1234", "verification_uri": "https://github.com/login/device", "interval": 0, "expires_in": 60},
             {"error": "authorization_pending"},

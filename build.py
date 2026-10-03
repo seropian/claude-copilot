@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """Build the self-contained claude-copilot.sh artifact."""
 import argparse
+import io
 import os
 import re
 import stat
 import tempfile
+import tokenize
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 TEMPLATE = ROOT / "src" / "launcher.sh.in"
-MANIFEST = ROOT / "src" / "shim" / "MANIFEST"
+PACKAGE = ROOT / "src" / "claude_copilot_shim"
 VERSION_FILE = ROOT / "VERSION"
 OUTPUT = ROOT / "dist" / "claude-copilot.sh"
 MARKER = "__CLAUDE_COPILOT_SHIM__"
+VERSION_MARKER = "__CLAUDE_COPILOT_VERSION__"
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
+MODULE_ORDER = ("config.py", "helpers.py", "auth.py", "models.py", "transforms.py", "stream.py", "server.py", "cli.py")
 
 
 def read_version():
@@ -23,20 +27,50 @@ def read_version():
     return version
 
 
+def package_files():
+    if not PACKAGE.is_dir():
+        raise SystemExit("missing shim package: %s" % PACKAGE)
+    files = {name: PACKAGE / name for name in MODULE_ORDER}
+    missing = [name for name, path in files.items() if not path.is_file()]
+    if missing:
+        raise SystemExit("missing shim modules: %s" % ", ".join(missing))
+    return files
+
+
+def minify_source(source):
+    """Remove comments and blank lines without changing Python token spacing."""
+    lines = source.splitlines()
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type != tokenize.COMMENT:
+            continue
+        row, col = token.start
+        end_row, end_col = token.end
+        if row == end_row:
+            lines[row - 1] = lines[row - 1][:col] + lines[row - 1][end_col:]
+        else:
+            lines[row - 1] = lines[row - 1][:col]
+            for line in range(row, end_row - 1):
+                lines[line] = ""
+            lines[end_row - 1] = lines[end_row - 1][end_col:]
+    return "\n".join(line.rstrip() for line in lines if line.strip()) + "\n"
+
+
 def read_shim():
-    names = [line.strip() for line in MANIFEST.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not names:
-        raise SystemExit("shim manifest is empty")
+    files = package_files()
     parts = []
-    for name in names:
-        path = ROOT / name
-        if path.suffix != ".py" or not path.is_file():
-            raise SystemExit("missing shim source: %s" % name)
-        text = path.read_text(encoding="utf-8")
-        if "'" in text:
-            raise SystemExit("shim source contains a single quote: %s" % name)
-        parts.append(text.rstrip("\n"))
-    return "\n".join(parts) + "\n"
+    for name in MODULE_ORDER:
+        source = files[name].read_text(encoding="utf-8")
+        source = re.sub(r"^from \.\w* import .*\n", "", source, flags=re.MULTILINE)
+        parts.append(minify_source(source).rstrip("\n"))
+    source = "\n".join(parts) + "\n"
+    source += "\nimport sys\nsys.exit(main(sys.argv[1:]))\n"
+    try:
+        compile(source, "<claude-copilot-shim>", "exec")
+    except SyntaxError as e:
+        raise SystemExit("invalid bundled shim: %s" % e)
+    if "'" in source:
+        raise SystemExit("shim source contains a single quote")
+    return source
 
 
 def build_bytes():
@@ -44,11 +78,12 @@ def build_bytes():
     template = TEMPLATE.read_text(encoding="utf-8")
     if template.count(MARKER) != 1:
         raise SystemExit("launcher template must contain exactly one build marker")
-    # Keep the version visible without changing the launcher/shim runtime.
+    if template.count(VERSION_MARKER) != 1:
+        raise SystemExit("launcher template must contain exactly one version marker")
     header = "# claude-copilot version %s (generated; edit src/, not this file)\n" % version
     if not template.startswith("#!/"):
         raise SystemExit("launcher template must start with a shebang")
-    output = template.replace("\n", "\n").replace(MARKER, read_shim())
+    output = template.replace(MARKER, read_shim()).replace(VERSION_MARKER, version)
     output = output.split("\n", 1)[0] + "\n" + header + output.split("\n", 1)[1]
     return output.encode("utf-8")
 

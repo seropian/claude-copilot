@@ -1,3 +1,5 @@
+import base64
+
 def blocks(c): return [{"type": "text", "text": c}] if isinstance(c, str) else list(c or [])
 def txt(c): return "".join(b.get("text", "") for b in blocks(c) if b.get("type") == "text")
 def data_url(s): return "data:%s;base64,%s" % (s["media_type"], s["data"])
