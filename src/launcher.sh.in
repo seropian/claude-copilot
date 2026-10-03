@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # claude-copilot: run Claude Code on GitHub Copilot models. See README.md.
 
+_cc_version="__CLAUDE_COPILOT_VERSION__"
+_cc_update_state=""
+
 # Prerequisites: python3 (3.6+), curl, claude. Prints what is missing and how to get it.
 _cc_check() {
   local c missing=""
@@ -30,7 +33,101 @@ _cc_cleanup() {
   return 0
 }
 
-_cc_fail() { trap - HUP TERM INT; return 1; }
+_cc_fail() {
+  [ -n "$_cc_update_state" ] && rm -f "$_cc_update_state"
+  trap - HUP TERM INT
+  return 1
+}
+
+_cc_check_update() {
+  local script="$1" state="$2" dir latest tmp expected actual
+  [ -f "$script" ] && [ ! -L "$script" ] || return 0
+  dir="${script%/*}"
+  [ "$dir" = "$script" ] && dir="."
+  [ -w "$dir" ] || return 0
+  latest=$(curl -fsSL -m 5 https://api.github.com/repos/seropian/claude-copilot/releases/latest 2>/dev/null |
+    python3 -c 'import json, sys; tag = json.load(sys.stdin).get("tag_name", ""); print(tag[1:] if tag.startswith("v") else tag)' 2>/dev/null) || return 0
+  [ -n "$latest" ] || return 0
+  python3 -c '
+import re, sys
+def v(s):
+    return tuple(int(x) for x in re.findall(r"\d+", s.split("-")[0].split("+")[0]))
+sys.exit(0 if v(sys.argv[1]) > v(sys.argv[2]) else 1)' "$latest" "$_cc_version" 2>/dev/null || return 0
+  tmp=$(mktemp "$dir/.claude-copilot-update.XXXXXX") || return 0
+  if ! curl -fsSL -m 20 \
+    https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh -o "$tmp" ||
+    [ "$(head -c 2 "$tmp")" != "#!" ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+  expected=$(curl -fsSL -m 5 \
+    https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh.sha256 2>/dev/null |
+    awk 'NR == 1 {print $1}') || { rm -f "$tmp"; return 0; }
+  actual=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$tmp" 2>/dev/null) ||
+    { rm -f "$tmp"; return 0; }
+  if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+  chmod +x "$tmp" || { rm -f "$tmp"; return 0; }
+  printf '%s\n' "$tmp" > "$state" || rm -f "$tmp"
+}
+
+_cc_start_update_check() {
+  local script="$1" dir state
+  [ "${_cc_update_enabled:-0}" = 1 ] || return 0
+  dir="${script%/*}"
+  [ "$dir" = "$script" ] && dir="."
+  [ -w "$dir" ] || return 0
+  state=$(mktemp "$dir/.claude-copilot-update-state.XXXXXX") || return 0
+  rm -f "$state"
+  _cc_update_state="$state"
+  (_cc_check_update "$script" "$state" >/dev/null 2>&1 || true) &
+}
+
+_cc_schedule_update() {
+  local script="$1" state="$2" pid="$$"
+  [ -n "$state" ] || return 0
+  python3 - "$pid" "$script" "$state" <<'PY' >/dev/null 2>&1 &
+import os
+import sys
+import time
+
+pid, target, state = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+while True:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        break
+    except PermissionError:
+        break
+    time.sleep(0.1)
+update = ""
+deadline = time.time() + 60
+while time.time() < deadline:
+    try:
+        with open(state) as f:
+            update = f.read().strip()
+        if update:
+            break
+    except OSError:
+        pass
+    time.sleep(0.1)
+try:
+    if update:
+        os.replace(update, target)
+except OSError:
+    try:
+        if update:
+            os.unlink(update)
+    except OSError:
+        pass
+try:
+    os.unlink(state)
+except OSError:
+    pass
+PY
+}
 
 claude-copilot() {
   unset _cc_sig
@@ -40,7 +137,9 @@ claude-copilot() {
   local log="${TMPDIR:-/tmp}/claude-copilot.log"
   local spid="" pf="" i rc ms key
   local -a sa=()
+  local script="${BASH_SOURCE[0]:-$0}"
 
+  _cc_start_update_check "$script"
   # Shim source (python). Usage: login | serve <port, 0 = any free> <file to write "pid port" to>.
   # login: GitHub device-code login, token kept in ~/.local/share/claude-copilot.
   # serve: local Anthropic-style API in front of GitHub Copilot, see README, "How it works".
@@ -85,7 +184,24 @@ __CLAUDE_COPILOT_SHIM__
   # 3) claude, with env scoped to this one command (shell env stays clean).
   # Feed every model Copilot offers into the /model picker (modelPicker setting, user scope).
   ms=$(printf 'header = "x-api-key: %s"\n' "$key" | curl -sf -m 20 -K - "http://127.0.0.1:$sport/claude-settings")
-  case "$ms" in "{}"|"") ;; "{"*) sa=(--settings "$ms") ;; esac
+  case "$ms" in
+    "{"*)
+      ms=$(CC_SETTINGS_BASE="http://127.0.0.1:$sport" CC_SETTINGS_KEY="$key" \
+        CC_SETTINGS_MODEL="$model" \
+        CC_SETTINGS_SONNET="${COPILOT_SONNET_MODEL:-claude-sonnet-5.5}" \
+        CC_SETTINGS_OPUS="${COPILOT_OPUS_MODEL:-claude-opus-5.5}" \
+        CC_SETTINGS_FABLE="${COPILOT_FABLE_MODEL:-claude-opus-5.5}" \
+        CC_SETTINGS_HAIKU="${COPILOT_HAIKU_MODEL:-claude-haiku-4.5}" \
+        python3 -c 'import json, os, sys; s=json.load(sys.stdin); s.setdefault("env", {}).update({
+          "ANTHROPIC_BASE_URL": os.environ["CC_SETTINGS_BASE"], "ANTHROPIC_AUTH_TOKEN": os.environ["CC_SETTINGS_KEY"],
+          "ANTHROPIC_MODEL": os.environ["CC_SETTINGS_MODEL"],
+          "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ["CC_SETTINGS_SONNET"], "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ["CC_SETTINGS_OPUS"],
+          "ANTHROPIC_DEFAULT_FABLE_MODEL": os.environ["CC_SETTINGS_FABLE"], "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ["CC_SETTINGS_HAIKU"],
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+          "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1"}); print(json.dumps(s, separators=(",", ":")))' <<<"$ms") || ms=""
+      [ -n "$ms" ] && sa=(--settings "$ms")
+      ;;
+  esac
   # INT is a no-op here (claude resets it to default) so claude's exit code survives ctrl-c.
   trap : INT
   ANTHROPIC_BASE_URL="http://127.0.0.1:$sport" \
@@ -103,6 +219,8 @@ __CLAUDE_COPILOT_SHIM__
 
   # 4) cleanup
   _cc_cleanup "$spid" "$pf"
+  _cc_schedule_update "$script" "$_cc_update_state"
+  _cc_update_state=""
   trap - HUP TERM INT
   return $rc
 }
@@ -116,6 +234,7 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   [ "${BASH_SOURCE[0]}" != "$0" ] && _cc_sourced=1
 fi
 if [ "$_cc_sourced" = 0 ]; then
+  _cc_update_enabled=1
   claude-copilot "$@"
   _cc_rc=$?
   exit "${_cc_sig:-$_cc_rc}"

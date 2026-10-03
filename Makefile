@@ -17,4 +17,4 @@ release:
 	@./scripts/release.sh "$(VERSION)"
 
 clean:
-	rm -rf src/shim/__pycache__ tests/__pycache__
+	rm -rf src/claude_copilot_shim/__pycache__ tests/__pycache__
