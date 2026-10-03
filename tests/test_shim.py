@@ -17,20 +17,38 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_shim():
-    src = open(os.path.join(ROOT, "claude-copilot.sh")).read()
-    m = re.search(r"local shim='\n(.*?)\n'\n", src, re.S)
-    assert m, "shim source not found in claude-copilot.sh"
+    manifest = os.path.join(ROOT, "src", "shim", "MANIFEST")
+    files = [line.strip() for line in open(manifest) if line.strip()]
+    source = "\n".join(open(os.path.join(ROOT, name)).read().rstrip("\n") for name in files) + "\n"
     mod = types.ModuleType("shim")
     old = sys.argv
     sys.argv = ["shim", "test"]  # neither login nor serve
     try:
-        exec(compile(m.group(1), "shim", "exec"), mod.__dict__)
+        exec(compile(source, "shim", "exec"), mod.__dict__)
     finally:
         sys.argv = old
     return mod
 
 
+def load_artifact_shim():
+    src = open(os.path.join(ROOT, "dist", "claude-copilot.sh")).read()
+    m = re.search(r"local shim='\n(.*?)\n'\n", src, re.S)
+    assert m, "shim source not found in claude-copilot.sh"
+    return m.group(1)
+
+
 shim = load_shim()
+
+
+class BuildArtifact(unittest.TestCase):
+    def test_artifact_embeds_source_exactly(self):
+        manifest = [line.strip() for line in open(os.path.join(ROOT, "src", "shim", "MANIFEST")) if line.strip()]
+        source = "\n".join(open(os.path.join(ROOT, name)).read().rstrip("\n") for name in manifest) + "\n"
+        self.assertEqual(load_artifact_shim(), source)
+
+    def test_artifact_is_valid_shell(self):
+        self.assertTrue(os.access(os.path.join(ROOT, "dist", "claude-copilot.sh"), os.X_OK))
+
 
 
 class Upstream:

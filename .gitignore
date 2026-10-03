@@ -16,3 +16,6 @@
 
 # Python
 __pycache__/
+
+# Generated distribution artifact
+dist/

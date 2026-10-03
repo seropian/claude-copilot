@@ -1,0 +1,29 @@
+import hashlib
+import os
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class BuildTests(unittest.TestCase):
+    def run_build(self, *args):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "build.py")] + list(args), cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def test_artifact_is_current(self):
+        result = self.run_build("--check")
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def test_build_is_deterministic(self):
+        artifact = Path(ROOT) / "dist" / "claude-copilot.sh"
+        before = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        self.assertEqual(self.run_build().returncode, 0)
+        after = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        self.assertEqual(before, after)
+
+    def test_shell_syntax(self):
+        result = subprocess.run(["bash", "-n", os.path.join(ROOT, "dist", "claude-copilot.sh")], cwd=ROOT)
+        self.assertEqual(result.returncode, 0)
