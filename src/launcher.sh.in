@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# claude-copilot: run Claude Code on GitHub Copilot models. See README.md.
+
+# Prerequisites: python3 (3.6+), curl, claude. Prints what is missing and how to get it.
+_cc_check() {
+  local c missing=""
+  for c in python3 curl claude; do
+    command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+  done
+  if [ -n "$missing" ]; then
+    echo "claude-copilot: missing required tools:$missing" >&2
+    case "$missing" in *python3*) echo "  python3: https://www.python.org/downloads/ (macOS: brew install python)" >&2 ;; esac
+    case "$missing" in *curl*) echo "  curl: use your package manager (brew install curl, apt install curl)" >&2 ;; esac
+    case "$missing" in *claude*) echo "  claude (Claude Code): https://code.claude.com/docs/en/setup" >&2 ;; esac
+    return 1
+  fi
+  if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2>/dev/null; then
+    echo "claude-copilot: python3 3.6 or newer is required (found $(python3 --version 2>&1))" >&2
+    return 1
+  fi
+}
+
+# args: shim pid, port file. Kills our shim and removes the files.
+# No pid yet (we were interrupted before the shim wrote its port file)? Use the early pid file.
+_cc_cleanup() {
+  local p="$1"
+  [ -z "$p" ] && [ -n "$2" ] && [ -f "$2.pid" ] && p=$(cat "$2.pid" 2>/dev/null)
+  case "$p" in ''|*[!0-9]*) ;; *) kill "$p" 2>/dev/null ;; esac
+  [ -n "$2" ] && rm -f "$2" "$2.pid" "$2.tmp"
+  return 0
+}
+
+_cc_fail() { trap - HUP TERM INT; return 1; }
+
+claude-copilot() {
+  unset _cc_sig
+  _cc_check || return 1
+  local sport="${COPILOT_SHIM_PORT:-0}"
+  local model="${COPILOT_CLAUDE_MODEL:-claude-sonnet-5.5}"
+  local log="${TMPDIR:-/tmp}/claude-copilot.log"
+  local spid="" pf="" i rc ms key
+  local -a sa=()
+
+  # Shim source (python). Usage: login | serve <port, 0 = any free> <file to write "pid port" to>.
+  # login: GitHub device-code login, token kept in ~/.local/share/claude-copilot.
+  # serve: local Anthropic-style API in front of GitHub Copilot, see README, "How it works".
+  local shim='
+__CLAUDE_COPILOT_SHIM__
+'
+
+  # a hangup/kill/ctrl-c anywhere below tears down what we started (_cc_sig: exit code for the executed wrapper, bash 3.2 loses `return N` from an INT trap)
+  [ -n "${ZSH_VERSION:-}" ] && setopt local_options no_monitor no_notify 2>/dev/null
+  trap '_cc_cleanup "$spid" "$pf"; trap - HUP TERM INT; _cc_sig=129; return 129' HUP
+  trap '_cc_cleanup "$spid" "$pf"; trap - HUP TERM INT; _cc_sig=143; return 143' TERM
+  trap '_cc_cleanup "$spid" "$pf"; trap - HUP TERM INT; _cc_sig=130; return 130' INT
+
+  # 1) login: no-op when a token is already stored
+  python3 -c "$shim" login || { _cc_fail; return; }
+
+  # 2) shim: own instance per run on a free port (or COPILOT_SHIM_PORT), it writes "pid port" to a temp file
+  case "$sport" in ''|*[!0-9]*) echo "claude-copilot: COPILOT_SHIM_PORT must be a port number, got '$sport'" >&2; _cc_fail; return ;; esac
+  if [ "$sport" != 0 ] && python3 -c 'import socket, sys; sys.exit(0 if socket.socket().connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$sport"; then
+    echo "claude-copilot: port $sport busy, unset COPILOT_SHIM_PORT to pick a free one" >&2
+    _cc_fail; return
+  fi
+  if [ -L "$log" ]; then
+    echo "claude-copilot: refusing to write to $log, it is a symlink" >&2; _cc_fail; return
+  fi
+  key=$(python3 -c 'import secrets; print(secrets.token_hex(24))') || { _cc_fail; return; }
+  pf=$(mktemp "${TMPDIR:-/tmp}/claude-copilot.XXXXXX") || { _cc_fail; return; }
+  ( umask 077; COPILOT_SHIM_KEY="$key" nohup python3 -c "$shim" serve "$sport" "$pf" >>"$log" 2>&1 & echo $! >"$pf.pid" )
+  sport=""
+  for i in $(seq 1 100); do
+    read -r spid sport < "$pf" 2>/dev/null
+    [ -n "$sport" ] && break
+    sleep 0.1
+  done
+  if [ -z "$sport" ]; then
+    echo "claude-copilot: shim didn't start, see $log" >&2
+    tail -n 5 "$log" 2>/dev/null | sed 's/^/  /' >&2
+    _cc_cleanup "$spid" "$pf"
+    _cc_fail; return
+  fi
+
+  # 3) claude, with env scoped to this one command (shell env stays clean).
+  # Feed every model Copilot offers into the /model picker (modelPicker setting, user scope).
+  ms=$(printf 'header = "x-api-key: %s"\n' "$key" | curl -sf -m 20 -K - "http://127.0.0.1:$sport/claude-settings")
+  case "$ms" in "{}"|"") ;; "{"*) sa=(--settings "$ms") ;; esac
+  # INT is a no-op here (claude resets it to default) so claude's exit code survives ctrl-c.
+  trap : INT
+  ANTHROPIC_BASE_URL="http://127.0.0.1:$sport" \
+  ANTHROPIC_AUTH_TOKEN="$key" \
+  ANTHROPIC_MODEL="$model" \
+  ANTHROPIC_DEFAULT_SONNET_MODEL="${COPILOT_SONNET_MODEL:-claude-sonnet-5.5}" \
+  ANTHROPIC_DEFAULT_OPUS_MODEL="${COPILOT_OPUS_MODEL:-claude-opus-5.5}" \
+  ANTHROPIC_DEFAULT_FABLE_MODEL="${COPILOT_FABLE_MODEL:-claude-opus-5.5}" \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL="${COPILOT_HAIKU_MODEL:-claude-haiku-4.5}" \
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  CLAUDE_CODE_AUTO_MODE_SERVER=0 \
+  CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 \
+  command claude --model "$model" ${sa[@]+"${sa[@]}"} "$@"
+  rc=$?
+
+  # 4) cleanup
+  _cc_cleanup "$spid" "$pf"
+  trap - HUP TERM INT
+  return $rc
+}
+
+# executed (not sourced): run it. zsh: sourced context ends in ":file".
+# bash: sourced when $BASH_SOURCE differs from $0.
+_cc_sourced=0
+if [ -n "${ZSH_VERSION:-}" ]; then
+  case "${ZSH_EVAL_CONTEXT:-}" in *:file*) _cc_sourced=1 ;; esac
+elif [ -n "${BASH_VERSION:-}" ]; then
+  [ "${BASH_SOURCE[0]}" != "$0" ] && _cc_sourced=1
+fi
+if [ "$_cc_sourced" = 0 ]; then
+  claude-copilot "$@"
+  _cc_rc=$?
+  exit "${_cc_sig:-$_cc_rc}"
+fi
+unset _cc_sourced

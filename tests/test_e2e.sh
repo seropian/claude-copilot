@@ -6,7 +6,7 @@
 # Models per route (override as needed): E2E_NATIVE, E2E_RESPONSES, E2E_CHAT. Missing ones are skipped.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$ROOT/claude-copilot.sh"
+SCRIPT="$ROOT/dist/claude-copilot.sh"
 TMP="$(mktemp -d)"
 dpid=""
 trap '[ -n "$dpid" ] && kill "$dpid" 2>/dev/null; rm -rf "$TMP"' EXIT

@@ -10,6 +10,8 @@ One self-contained file: `claude-copilot.sh`. Works in bash 3.2+ (incl. macOS `/
 
 `python3` (3.6+), `curl`, `claude` (Claude Code). Run it from an interactive terminal (the first-run login needs one). No node, no npm packages. The script checks these on startup and tells you what's missing.
 
+The published release artifact is a single self-contained `claude-copilot.sh`. The repository source is split into testable files under `src/`; `dist/` is generated locally and is not committed.
+
 First run asks for a GitHub device-code login (open the URL, type the code). The login is kept in `~/.local/share/claude-copilot/github_token` (mode 600).
 
 ## Install
@@ -18,7 +20,29 @@ First run asks for a GitHub device-code login (open the URL, type the code). The
 curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/install.sh | bash
 ```
 
-Installs to `~/.local/bin/claude-copilot` (override with `INSTALL_DIR`). Rerun to update. Set `CLAUDE_COPILOT_REF` to pin a branch, tag or commit. Want to read it first? Download `install.sh` and run it yourself.
+Install a pinned release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/install.sh \
+  | CLAUDE_COPILOT_VERSION=0.1.0 bash
+```
+
+Installs the latest GitHub Release to `~/.local/bin/claude-copilot` (override with `INSTALL_DIR`). Rerun to update. Set `CLAUDE_COPILOT_VERSION` to pin a release. Development branch installs are not supported because the generated artifact is intentionally not committed; build locally with `make build` instead. Want to read it first? Download `install.sh` and run it yourself.
+
+Release assets are available at:
+
+```text
+https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh
+https://github.com/seropian/claude-copilot/releases/download/v0.1.0/claude-copilot.sh
+```
+
+Verify a downloaded asset with the checksum from the same release:
+
+```sh
+curl -fsSLO https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh
+curl -fsSLO https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh.sha256
+shasum -a 256 -c claude-copilot.sh.sha256
+```
 
 ## Uninstall
 
@@ -27,6 +51,26 @@ curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/uninst
 ```
 
 Removes `~/.local/bin/claude-copilot` (or `INSTALL_DIR`), the saved login in `~/.local/share/claude-copilot`, and the log. Set `KEEP_LOGIN=1` to keep the token. Or by hand: `rm ~/.local/bin/claude-copilot; rm -rf ~/.local/share/claude-copilot`. Also remove the `PATH` line from your shell profile if you added it.
+
+## Building and releasing
+
+Source lives under `src/`; `dist/claude-copilot.sh` is generated and should not be edited by hand. The `dist/` directory is local build output and is not committed. Build and test it with:
+
+```sh
+make build
+make test
+make check
+```
+
+Create and publish a versioned release by pushing a tag through the release target:
+
+```sh
+make release VERSION=0.1.0
+```
+
+This updates `VERSION`, builds the ignored `dist/claude-copilot.sh`, runs tests, commits the source and version only, creates `v0.1.0`, and pushes the commit and tag. GitHub Actions then builds the artifact again, verifies it, and publishes `claude-copilot.sh` plus its SHA-256 checksum as a GitHub Release. Real network tests remain opt-in with `E2E=1 make test`.
+
+The release workflow is the only publishing step. It never commits `dist/`; rerunning a tag workflow re-uploads the same deterministic assets.
 
 ## Usage
 
@@ -93,7 +137,7 @@ Installer vars (only read by `install.sh` / `uninstall.sh`):
 | Var | Default | What |
 |---|---|---|
 | `INSTALL_DIR` | `~/.local/bin` | where the script is installed or removed from |
-| `CLAUDE_COPILOT_REF` | `main` | branch, tag or commit to install |
+| `CLAUDE_COPILOT_VERSION` | unset (latest release) | release version to install, e.g. `0.1.0` |
 | `KEEP_LOGIN` | unset | set to `1` to keep the saved token on uninstall |
 
 Files:

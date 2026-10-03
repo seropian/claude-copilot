@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # Install claude-copilot. See README.md.
 # Usage: curl -fsSL https://raw.githubusercontent.com/seropian/claude-copilot/main/install.sh | bash
-# Env: CLAUDE_COPILOT_REF (branch/tag/commit, default main), INSTALL_DIR (default ~/.local/bin)
+# Env: CLAUDE_COPILOT_VERSION (release version, default latest), INSTALL_DIR (default ~/.local/bin)
 
 # Everything lives in main() and is called on the last line, so a truncated download can't run half a script.
 main() {
   set -eu
 
-  local ref="${CLAUDE_COPILOT_REF:-main}"
-  case "$ref" in
-    ''|*[!A-Za-z0-9._/-]*|*..*) echo "install failed: CLAUDE_COPILOT_REF has odd characters: $ref" >&2; return 1 ;;
-  esac
-  local url="https://raw.githubusercontent.com/seropian/claude-copilot/$ref/claude-copilot.sh"
+  local version="${CLAUDE_COPILOT_VERSION:-}" url
+  if [ -n "$version" ]; then
+    case "$version" in
+      [0-9]*.[0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*[-+][A-Za-z0-9.-]*) ;;
+      *) echo "install failed: CLAUDE_COPILOT_VERSION has odd characters: $version" >&2; return 1 ;;
+    esac
+    url="https://github.com/seropian/claude-copilot/releases/download/v$version/claude-copilot.sh"
+  else
+    url="https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh"
+  fi
   local dir="${INSTALL_DIR:-$HOME/.local/bin}"
   case "$dir" in "~"|"~/"*) dir="$HOME${dir#\~}" ;; esac
   local dest="$dir/claude-copilot" c

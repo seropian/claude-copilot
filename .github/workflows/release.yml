@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Verify tag and version
+        shell: bash
+        run: |
+          test "${GITHUB_REF_NAME}" = "v$(tr -d '[:space:]' < VERSION)"
+
+      - name: Build and test
+        run: |
+          python3 build.py
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          bash tests/test_shell.sh
+          python3 build.py --check
+
+      - name: Create checksum
+        run: shasum -a 256 dist/claude-copilot.sh > dist/claude-copilot.sh.sha256
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              dist/claude-copilot.sh#claude-copilot.sh \
+              dist/claude-copilot.sh.sha256#claude-copilot.sh.sha256 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
+            gh release upload "$GITHUB_REF_NAME" \
+              dist/claude-copilot.sh#claude-copilot.sh \
+              dist/claude-copilot.sh.sha256#claude-copilot.sh.sha256
+          fi
