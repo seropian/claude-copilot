@@ -84,6 +84,33 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 [ "$(cat "$UPD/app")" = new ]; check "updater replaces the file after launcher exit" $?
 
+# ---------- update check version comparison ----------
+
+UC="$TMP/uc"; mkdir -p "$UC/bin"
+printf '#!/bin/sh\n' > "$UC/payload"
+UC_SUM=$("$PY" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$UC/payload")
+cat > "$UC/bin/curl" <<EOF
+#!/bin/sh
+case "\$*" in
+  *api.github.com*) echo "{\"tag_name\": \"v\$FAKE_LATEST\"}" ;;
+  *.sha256*) echo "$UC_SUM  claude-copilot.sh" ;;
+  *) while [ \$# -gt 0 ]; do [ "\$1" = -o ] && cp "$UC/payload" "\$2"; shift; done ;;
+esac
+EOF
+chmod +x "$UC/bin/curl"
+ln -sf "$PY" "$UC/bin/python3"
+printf '#!/bin/sh\n' > "$UC/app"
+uc_staged() { # running version, latest published
+  rm -f "$UC/state"
+  PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST="$2" /bin/bash -c ". '$SCRIPT'; _cc_version='$1'; _cc_check_update '$UC/app' '$UC/state'" >/dev/null 2>&1
+  [ -s "$UC/state" ]
+}
+uc_staged 1.0.0 1.1.0; check "update check stages a newer release" $?
+uc_staged 1.1.0 1.1.0; [ $? -ne 0 ]; check "update check ignores the same version" $?
+uc_staged 1.2.0 1.1.0; [ $? -ne 0 ]; check "update check ignores an older release" $?
+uc_staged 1.9.0 1.10.0; check "update check compares numerically (1.10.0 > 1.9.0)" $?
+rm -f "$UC"/.claude-copilot-update.*
+
 # ---------- sourcing vs executing ----------
 
 out=$(/bin/bash -c ". '$SCRIPT'; type claude-copilot" 2>&1); rc=$?
