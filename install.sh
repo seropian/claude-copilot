@@ -10,7 +10,7 @@ main() {
   local url="https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh"
   local dir="${INSTALL_DIR:-$HOME/.local/bin}"
   case "$dir" in "~"|"~/"*) dir="$HOME${dir#\~}" ;; esac
-  local dest="$dir/claude-copilot" c
+  local dest="$dir/claude-copilot" c sum want got
 
   mkdir -p "$dir"
   tmp=$(mktemp "$dir/.claude-copilot.XXXXXX")
@@ -19,6 +19,15 @@ main() {
   if [ ! -s "$tmp" ] || [ "$(head -c 2 "$tmp")" != "#!" ]; then
     echo "install failed: $url didn't return a script" >&2
     return 1
+  fi
+  if sum=$(curl -fsSL "$url.sha256" 2>/dev/null) && [ -n "$sum" ]; then
+    want=${sum%% *}
+    got=$(shasum -a 256 "$tmp" 2>/dev/null || sha256sum "$tmp" 2>/dev/null) || got=""
+    got=${got%% *}
+    if [ -n "$got" ] && [ "$got" != "$want" ]; then
+      echo "install failed: checksum mismatch for $url" >&2
+      return 1
+    fi
   fi
   chmod +x "$tmp"
   mv "$tmp" "$dest"
