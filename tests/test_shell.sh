@@ -401,6 +401,25 @@ contains "$(cat "$CW/child.out")" "http://127.0.0.1:"; check "wrapper mode point
 cw_run /bin/bash "$SCRIPT" child >/dev/null 2>&1
 [ -s "$CW/claude.log" ]; check "relative command name is not wrapper mode" $?
 
+# the shim key must not show up in claude's argv (visible to other local users via ps)
+cat > "$CW/bin/claude" <<FAKE
+#!/bin/sh
+printf '%s\\n' "\$@" > "$CW/claude.args"
+FAKE
+rm -f "$CW/bin/curl"
+cat > "$CW/bin/curl" <<FAKE
+#!/bin/sh
+case "\$*" in *claude-settings*) cat >/dev/null; echo '{}' ;; *) exec "$CURL" "\$@" ;; esac
+FAKE
+chmod +x "$CW/bin/curl"
+cw_run /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1
+sfile=$(sed -n '/^--settings$/{n;p;}' "$CW/claude.args")
+[ -f "$sfile" ]; check "--settings is a file path" $? "$(cat "$CW/claude.args")"
+key=$(awk '{print $3}' "$CW/home/.local/share/claude-copilot/shim.state")
+! grep -q "$key" "$CW/claude.args"; check "shim key is not in claude's argv" $?
+grep -q "$key" "$sfile"; check "settings file carries the shim key" $?
+[ "$(ls -l "$sfile" | cut -c1-10)" = "-rw-------" ]; check "settings file is mode 600" $?
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

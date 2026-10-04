@@ -3,6 +3,10 @@ from .config import Config
 from .auth import CLIENT
 
 
+class CatalogUnavailable(Exception):
+    pass
+
+
 class ModelCatalog:
     def __init__(self, client, clock=None, logger=None):
         self.client = client
@@ -24,7 +28,9 @@ class ModelCatalog:
         return self.cache["data"]
 
     def endpoints(self, model):
-        for m in self.models():
+        data = self.models()
+        if not data: raise CatalogUnavailable("Copilot model list unavailable, try again in a moment.")
+        for m in data:
             if m["id"] == model: return m.get("supported_endpoints") or []
         return []
 

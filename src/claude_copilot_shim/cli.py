@@ -5,10 +5,12 @@ import socketserver
 import sys
 from .server import CopilotRequestHandler
 from .auth import login
-from .config import log
+from .config import KEY, log
 
 
-class LocalServer(http.server.ThreadingHTTPServer):
+class LocalServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
     def server_bind(self):
         # HTTPServer.server_bind calls socket.getfqdn(), a reverse DNS lookup that can stall for tens of seconds on macOS
         socketserver.TCPServer.server_bind(self)
@@ -23,6 +25,9 @@ def main(argv=None):
         return login()
     if argv[0] == "serve":
         if len(argv) < 3:
+            return 2
+        if not KEY:
+            log("shim: COPILOT_SHIM_KEY is not set, refusing to serve without an API key")
             return 2
         srv = LocalServer(("127.0.0.1", int(argv[1])), CopilotRequestHandler)
         def bye(n, _f):

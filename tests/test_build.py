@@ -52,11 +52,19 @@ class BuildTests(unittest.TestCase):
         r = subprocess.run([sys.executable, "-c", self.bundled_shim()], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         self.assertEqual(r.returncode, 2)
 
+    def test_bundle_serve_requires_key(self):
+        env = {k: v for k, v in os.environ.items() if k != "COPILOT_SHIM_KEY"}
+        r = subprocess.run([sys.executable, "-c", self.bundled_shim(), "serve", "0", "/nonexistent/state"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=env)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn(b"COPILOT_SHIM_KEY", r.stderr)
+
     def test_bundle_serves(self):
         import signal, tempfile, time, urllib.error, urllib.request
         with tempfile.TemporaryDirectory() as d:
             pf = os.path.join(d, "state")
-            proc = subprocess.Popen([sys.executable, "-c", self.bundled_shim(), "serve", "0", pf], stderr=subprocess.PIPE)
+            proc = subprocess.Popen([sys.executable, "-c", self.bundled_shim(), "serve", "0", pf], stderr=subprocess.PIPE,
+                                    env=dict(os.environ, COPILOT_SHIM_KEY="k"))
             try:
                 for _ in range(300):
                     if os.path.exists(pf) or proc.poll() is not None:
@@ -67,7 +75,7 @@ class BuildTests(unittest.TestCase):
                     self.fail("shim did not write its state file: %s" % proc.stderr.read().decode(errors="replace"))
                 pid, port = open(pf).read().split()
                 with self.assertRaises(urllib.error.HTTPError) as cm:
-                    urllib.request.urlopen("http://127.0.0.1:%s/nope" % port, timeout=10)
+                    urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:%s/nope" % port, headers={"x-api-key": "k"}), timeout=10)
                 self.assertEqual(cm.exception.code, 404)
             finally:
                 proc.send_signal(signal.SIGTERM)

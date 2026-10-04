@@ -2,7 +2,7 @@ import hmac, http.server, json, urllib.error, uuid
 from .config import KEY, MAX_BODY, log
 from .auth import cp_open
 from .helpers import adapt_thinking, drop_path, err, fix, has_image, is_agent, THINK, thinking_fix
-from .models import endpoints, picker_models
+from .models import CatalogUnavailable, endpoints, picker_models
 from .stream import sse_events, count_tokens
 from .transforms import CHAT_STOP, chat_usage, from_chat, from_responses, picker_settings, stop_reason, to_chat, to_responses, usage
 
@@ -171,6 +171,8 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
             return self.via(j, "/chat/completions", to_chat(j), from_chat, self.stream_chat)
         except RuntimeError as e:
             log("shim: %s" % e); self.reply(401, err(str(e)))
+        except CatalogUnavailable as e:
+            log("shim: %s" % e); self.reply(503, err(str(e)))
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
