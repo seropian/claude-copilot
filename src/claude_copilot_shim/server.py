@@ -1,7 +1,14 @@
+import hmac, http.server, json, urllib.error, uuid
+from .config import KEY, MAX_BODY, log
+from .auth import CLIENT, cp_open
+from .helpers import adapt_thinking, drop_path, err, fix, has_image, is_agent, THINK, thinking_fix
+from .models import CATALOG, endpoints, picker_models
+from .stream import sse_events, count_tokens
+from .transforms import CHAT_STOP, chat_usage, from_chat, from_responses, picker_settings, stop_reason, to_chat, to_responses, usage
+
 class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
     client = CLIENT
     catalog = CATALOG
-    translator = TRANSLATOR
     def sse(self, ev, **d):
         self.wfile.write(("event: %s\ndata: %s\n\n" % (ev, json.dumps({"type": ev, **d}))).encode()); self.wfile.flush()
     def reply(self, code, obj):
