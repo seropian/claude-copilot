@@ -58,10 +58,13 @@ class BuildTests(unittest.TestCase):
             pf = os.path.join(d, "state")
             proc = subprocess.Popen([sys.executable, "-c", self.bundled_shim(), "serve", "0", pf], stderr=subprocess.PIPE)
             try:
-                for _ in range(100):
-                    if os.path.exists(pf):
+                for _ in range(300):
+                    if os.path.exists(pf) or proc.poll() is not None:
                         break
                     time.sleep(0.1)
+                if not os.path.exists(pf):
+                    proc.terminate()
+                    self.fail("shim did not write its state file: %s" % proc.stderr.read().decode(errors="replace"))
                 pid, port = open(pf).read().split()
                 with self.assertRaises(urllib.error.HTTPError) as cm:
                     urllib.request.urlopen("http://127.0.0.1:%s/nope" % port, timeout=10)
