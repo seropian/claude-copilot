@@ -105,7 +105,7 @@ One small Python server (bundled into the script) sits between Claude Code and C
 Lifecycle:
 
 1. Log in if there's no stored token.
-2. If `COPILOT_AUTO_UPDATE` is set (off by default), start a background GitHub Releases check for a newer launcher. Network, parsing, checksum, and download errors are ignored and never delay startup. The script and its SHA-256 come from the same release over HTTPS, so the checksum only catches a corrupted download; it doesn't protect against a compromised release. If that matters to you, leave `COPILOT_AUTO_UPDATE` unset and rerun the installer to update.
+2. If `COPILOT_AUTO_UPDATE` is set (off by default), start a background GitHub Releases check for a newer launcher. Network, parsing, checksum, and download errors are ignored and never delay startup. The script and its SHA-256 come from the same release over HTTPS, so the checksum only catches a corrupted download; it doesn't protect against a compromised release. If that matters to you, leave `COPILOT_AUTO_UPDATE` unset and rerun the installer to update. However it got updated, the next launch prints `claude-copilot: updated X -> Y` once (the last version that ran is kept in `last-version` in the state dir).
 3. Start the shim. Bails if its port is taken.
 4. Run `claude`.
 5. The shim is left running on purpose, so backgrounded or resumed sessions don't hit "connection refused". Later runs reuse it; if it died, they restart it on the same port with the same key so old sessions reconnect. With `COPILOT_AUTO_UPDATE` set, on a normal exit a helper waits for the launcher to stop and atomically replaces it with the verified download. HUP/TERM/INT during startup clean up the half-started shim.
