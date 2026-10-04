@@ -126,6 +126,8 @@ All env vars, all optional.
 | `COPILOT_AUTO_UPDATE` | unset | set to any value to turn on the background update check and the exit-time self-update. Off by default; rerun the installer to update by hand |
 | `COPILOT_SHIM_PORT` | unset (free port) | pin the shim to a fixed port (starts a separate shim if the running one uses another port) |
 | `COPILOT_STATE_DIR` | `~/.local/share/claude-copilot` | where the shim state file, lock and settings files live |
+| `COPILOT_EDITOR_VERSION` | `1.104.3` | VS Code version sent to Copilot in request headers |
+| `COPILOT_PLUGIN_VERSION` | `0.26.7` | Copilot Chat version sent to Copilot in request headers |
 | `COPILOT_TOKEN_FILE` | `~/.local/share/claude-copilot/github_token` | where the GitHub token is stored |
 
 Installer vars (only read by `install.sh` / `uninstall.sh`):
@@ -158,9 +160,9 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 - **Unofficial:** this uses GitHub's private Copilot endpoints, with the VS Code Copilot client id and headers. It may break when GitHub changes things, and may be against GitHub's terms. Your call.
 - **Billing:** premium requests count against your Copilot plan.
 - **Rate limits:** Copilot rate-limits per account and model tier (the small "utility" models like gpt-4o-mini hit it first). On a 429 Claude Code retries until it gives up, so it looks like a hang. Look for `429` in `$TMPDIR/claude-copilot.log`, wait it out.
-- **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude. Thinking blocks and prompt-cache controls are not translated. Images inside tool results (e.g. reading a screenshot) are replaced by `[image omitted]`; only images in user messages get through. Upstream errors keep their status but are all typed `api_error`, and `Retry-After` isn't forwarded, so Claude Code's "prompt too long" handling may not kick in. Tool-call arguments that aren't valid JSON (e.g. cut off by the token limit) become `{}`.
+- **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude. Thinking blocks and prompt-cache controls are not translated. Images inside tool results (e.g. reading a screenshot) are re-sent as a follow-up user message, since these APIs only take text in tool results. Upstream errors are mapped to Anthropic error types, `Retry-After` is forwarded, and context-length errors get a "prompt is too long" prefix so Claude Code can compact. A reply cut off by the token limit ends with `max_tokens`, even mid tool call. Non-streaming tool arguments that aren't valid JSON are logged and passed as `{}`.
 - **Premium-request accounting:** requests that already have an assistant turn are sent with `x-initiator: agent`, same as the VS Code client does for tool follow-ups. Whether Copilot bills those differently is up to GitHub.
-- **Pinned client identity:** the VS Code / Copilot Chat versions sent in headers are hardcoded. If GitHub starts rejecting them, the shim needs a new release.
+- **Pinned client identity:** the VS Code / Copilot Chat versions sent in headers default to hardcoded values. If GitHub starts rejecting them, set `COPILOT_EDITOR_VERSION` / `COPILOT_PLUGIN_VERSION` (or update the defaults).
 - **`auto` model:** Copilot's auto-routing is done client-side by Copilot's own apps, the API doesn't expose it. Use Copilot CLI for that.
 - **Catalog warning:** Claude Code warns the model isn't in its catalog and assumes a 200k context. The script sets `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` to relax that.
 - **Auto mode:** works, but the safety checks run as Claude Code's own requests through Copilot (they count against your plan), not on Anthropic's server. The script sets `CLAUDE_CODE_AUTO_MODE_SERVER=0` because Copilot rejects the `safeguards` field the server-side checks need, and this also stops the "session isn't eligible" notice. The classifier's `thinking: disabled` is handled by the shim, see "Request rewrites".

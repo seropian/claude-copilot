@@ -1,7 +1,7 @@
 import hmac, http.server, json, urllib.error, uuid
 from .config import KEY, MAX_BODY, log
 from .auth import cp_open
-from .helpers import adapt_thinking, drop_path, err, fix, has_image, is_agent, THINK, thinking_fix
+from .helpers import adapt_thinking, drop_path, err, fix, has_image, is_agent, THINK, thinking_fix, upstream_err
 from .models import CatalogUnavailable, endpoints, picker_models
 from .stream import sse_events, count_tokens
 from .transforms import CHAT_STOP, chat_usage, from_chat, from_responses, picker_settings, stop_reason, to_chat, to_responses, usage
@@ -9,9 +9,10 @@ from .transforms import CHAT_STOP, chat_usage, from_chat, from_responses, picker
 class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
     def sse(self, ev, **d):
         self.wfile.write(("event: %s\ndata: %s\n\n" % (ev, json.dumps({"type": ev, **d}))).encode()); self.wfile.flush()
-    def reply(self, code, obj):
+    def reply(self, code, obj, headers=None):
         data = json.dumps(obj).encode()
         self.send_response(code); self.send_header("content-type", "application/json")
+        for k, v in (headers or {}).items(): self.send_header(k, v)
         self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
     def start_stream(self, model):
         self.send_response(200); self.send_header("content-type", "text/event-stream")
@@ -82,7 +83,8 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
             r = cp_open(path, body, stream, has_image(j), is_agent(j))
         except urllib.error.HTTPError as e:
             msg = e.read().decode(errors="replace"); log("shim: %s %s: %s" % (path, e.code, msg[:300]))
-            return self.reply(e.code, err(msg))
+            ra = e.headers.get("retry-after") if e.headers else None
+            return self.reply(e.code, upstream_err(e.code, msg), {"retry-after": ra} if ra else None)
         except RuntimeError:
             raise
         except Exception as e:

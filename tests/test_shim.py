@@ -93,9 +93,10 @@ class Upstream:
                 route = up.routes.get(self.path)
                 if callable(route):
                     route = route(up.seen[-1])
-                status, ct, data = route or (404, "application/json", b"{}")
+                status, ct, data, *extra = route or (404, "application/json", b"{}")
                 self.send_response(status)
                 self.send_header("content-type", ct)
+                for k, v in (extra[0] if extra else {}).items(): self.send_header(k, v)
                 self.send_header("content-length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -109,8 +110,8 @@ class Upstream:
         self.url = "http://127.0.0.1:%d" % self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
-    def json(self, path, obj, status=200):
-        self.routes[path] = (status, "application/json", json.dumps(obj).encode())
+    def json(self, path, obj, status=200, headers=None):
+        self.routes[path] = (status, "application/json", json.dumps(obj).encode(), headers or {})
 
     def sse(self, path, events):
         data = "".join("data: %s\n\n" % (e if isinstance(e, str) else json.dumps(e)) for e in events).encode()
@@ -286,7 +287,8 @@ class Responses(unittest.TestCase):
     def test_stop_reason(self):
         self.assertEqual(shim.stop_reason({}, False), "end_turn")
         self.assertEqual(shim.stop_reason({"incomplete_details": {"reason": "max_output_tokens"}}, False), "max_tokens")
-        self.assertEqual(shim.stop_reason({"incomplete_details": {"reason": "max_output_tokens"}}, True), "tool_use")
+        self.assertEqual(shim.stop_reason({"incomplete_details": {"reason": "max_output_tokens"}}, True), "max_tokens")
+        self.assertEqual(shim.stop_reason({}, True), "tool_use")
 
 
 class Chat(unittest.TestCase):
@@ -704,6 +706,14 @@ class Server(Base):
         self.assertEqual(s, 503)
         self.assertEqual(self.up.seen[-1]["path"], "/models")
 
+    def test_upstream_429_keeps_retry_after_and_type(self):
+        self.models(model_entry("gpt", ["/responses"]))
+        self.up.json("/responses", {"error": {"message": "slow down"}}, status=429, headers={"Retry-After": "7"})
+        s, data, h = self.post({"model": "gpt", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(s, 429)
+        self.assertEqual(json.loads(data)["error"]["type"], "rate_limit_error")
+        self.assertEqual(h.headers.get("retry-after"), "7")
+
     def test_upstream_unreachable_is_502(self):
         shim.MODELS.update(at=time.time(), data=[model_entry("gpt", ["/responses"])])
         shim.CT["api"] = "http://127.0.0.1:1"
@@ -1055,7 +1065,37 @@ class Hardening(Base):
     def test_tool_result_image_leaves_placeholder(self):
         b = {"type": "tool_result", "tool_use_id": "c", "content": [
             {"type": "text", "text": "see "}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "Zg=="}}]}
+        self.assertEqual(shim.result_text(b), "see [image attached in the next message]")
+        b["content"][1]["source"] = {"type": "url", "url": "http://x/y.png"}
         self.assertEqual(shim.result_text(b), "see [image omitted]")
+
+    def test_tool_result_image_reattached_responses(self):
+        img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "Zg=="}}
+        body = shim.to_responses({"model": "m", "messages": [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "c", "name": "Read", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c", "content": [img]}]}]})
+        self.assertEqual([i["type"] for i in body["input"]], ["function_call", "function_call_output", "message"])
+        self.assertEqual(body["input"][2]["role"], "user")
+        self.assertEqual(body["input"][2]["content"][1], {"type": "input_image", "image_url": "data:image/png;base64,Zg=="})
+
+    def test_tool_result_image_reattached_chat(self):
+        img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "Zg=="}}
+        body = shim.to_chat({"model": "m", "messages": [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "c", "name": "Read", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c", "content": [img]}]}]})
+        self.assertEqual([m["role"] for m in body["messages"]], ["assistant", "tool", "user"])
+        self.assertEqual(body["messages"][2]["content"][1]["image_url"]["url"], "data:image/png;base64,Zg==")
+
+    def test_upstream_err_kinds(self):
+        self.assertEqual(shim.upstream_err(429, "{}")["error"]["type"], "rate_limit_error")
+        self.assertEqual(shim.upstream_err(500, "x")["error"]["type"], "api_error")
+        e = shim.upstream_err(400, json.dumps({"error": {"message": "This model's maximum context length is 8 tokens"}}))
+        self.assertEqual(e["error"]["type"], "invalid_request_error")
+        self.assertTrue(e["error"]["message"].startswith("prompt is too long: "))
+
+    def test_from_chat_length_with_tool_is_max_tokens(self):
+        r = {"choices": [{"message": {"tool_calls": [{"id": "c", "function": {"name": "f", "arguments": "{"}}]}, "finish_reason": "length"}]}
+        self.assertEqual(shim.from_chat(r, "m")["stop_reason"], "max_tokens")
 
     def test_from_responses_tolerates_odd_output(self):
         r = {"output": [{"type": "reasoning"}, {"foo": 1}, {"type": "message", "content": [{"type": "output_text"}]},
