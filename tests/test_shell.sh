@@ -6,7 +6,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/dist/claude-copilot.sh"
 INSTALL="$ROOT/install.sh"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+cleanup() { # launcher shims are nohup'd and outlive the test, so kill any serving out of $TMP before deleting it
+  for f in $(find "$TMP" -name shim.state 2>/dev/null); do read -r p _ < "$f"; kill "$p" 2>/dev/null; done
+  ps eww -axo pid=,command= 2>/dev/null | grep -F "$TMP/" | grep -F ' serve ' | awk '{print $1}' | xargs kill 2>/dev/null
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 pass=0 fail=0
 
 ok()   { pass=$((pass + 1)); echo "ok   - $1"; }
