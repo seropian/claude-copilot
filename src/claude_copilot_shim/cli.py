@@ -1,10 +1,18 @@
 import http.server
 import os
 import signal
+import socketserver
 import sys
 from .server import CopilotRequestHandler
 from .auth import login
 from .config import log
+
+
+class LocalServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind calls socket.getfqdn(), a reverse DNS lookup that can stall for tens of seconds on macOS
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def main(argv=None):
@@ -16,7 +24,7 @@ def main(argv=None):
     if argv[0] == "serve":
         if len(argv) < 3:
             return 2
-        srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(argv[1])), CopilotRequestHandler)
+        srv = LocalServer(("127.0.0.1", int(argv[1])), CopilotRequestHandler)
         def bye(n, _f):
             log("shim: pid %d exiting on signal %d" % (os.getpid(), n))
             os._exit(0)
