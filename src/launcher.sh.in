@@ -209,6 +209,7 @@ __CLAUDE_COPILOT_SHIM__
   local sdir="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}" sf opid="" oport="" okey="" over="" want="$sport" healthy=0
   sf="$sdir/shim.state"
   ( umask 077; mkdir -p "$sdir" ) 2>/dev/null
+  chmod 700 "$sdir" 2>/dev/null
   _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for $sdir/shim.lock" >&2; _cc_fail; return; }
   [ -f "$sf" ] && [ ! -L "$sf" ] && read -r opid oport okey over < "$sf" 2>/dev/null
   case "$oport" in ''|*[!0-9]*) oport=""; okey="" ;; esac

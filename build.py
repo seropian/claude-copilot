@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the self-contained claude-copilot.sh artifact."""
 import argparse
+import ast
 import io
 import os
 import re
@@ -45,16 +46,37 @@ def minify_source(source):
     return "\n".join(line.rstrip() for line in lines if line.strip()) + "\n"
 
 
+def strip_relative_imports(name, source):
+    tree = ast.parse(source, name)
+    lines = source.splitlines(True)
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level > 0:
+            for i in range(node.lineno - 1, node.end_lineno):
+                lines[i] = "\n"
+    return "".join(lines), tree
+
+
 def read_shim():
     if not PACKAGE.is_dir():
         raise SystemExit("missing shim package: %s" % PACKAGE)
+    extra = {p.name for p in PACKAGE.glob("*.py")} - set(MODULE_ORDER) - {"__init__.py", "__main__.py"}
+    if extra:
+        raise SystemExit("modules missing from MODULE_ORDER: %s" % ", ".join(sorted(extra)))
+    if ast.parse((PACKAGE / "__init__.py").read_text(encoding="utf-8")).body:
+        raise SystemExit("__init__.py must stay empty, it is not bundled")
     parts = []
+    seen = {}
     for name in MODULE_ORDER:
         path = PACKAGE / name
         if not path.is_file():
             raise SystemExit("missing shim module: %s" % name)
         source = path.read_text(encoding="utf-8")
-        source = re.sub(r"^from \.\w* import .*\n", "", source, flags=re.MULTILINE)
+        source, tree = strip_relative_imports(name, source)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                if node.name in seen:
+                    raise SystemExit("%s redefines %s from %s" % (name, node.name, seen[node.name]))
+                seen[node.name] = name
         parts.append(minify_source(source).rstrip("\n"))
     source = "\n".join(parts) + "\n"
     source += "\nimport sys\nsys.exit(main(sys.argv[1:]))\n"
@@ -62,6 +84,7 @@ def read_shim():
         compile(source, "<claude-copilot-shim>", "exec")
     except SyntaxError as e:
         raise SystemExit("invalid bundled shim: %s" % e)
+    # the launcher embeds the shim in a single-quoted bash string
     if "'" in source:
         raise SystemExit("shim source contains a single quote")
     return source

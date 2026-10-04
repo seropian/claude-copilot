@@ -33,7 +33,7 @@ jobs:
           python3 build.py --check
 
       - name: Create checksum
-        run: shasum -a 256 dist/claude-copilot.sh > dist/claude-copilot.sh.sha256
+        run: cd dist && shasum -a 256 claude-copilot.sh > claude-copilot.sh.sha256
 
       - name: Publish GitHub Release
         env:
@@ -44,8 +44,7 @@ jobs:
               dist/claude-copilot.sh#claude-copilot.sh \
               dist/claude-copilot.sh.sha256#claude-copilot.sh.sha256 --clobber
           else
-            gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
-            gh release upload "$GITHUB_REF_NAME" \
+            gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" \
               dist/claude-copilot.sh#claude-copilot.sh \
               dist/claude-copilot.sh.sha256#claude-copilot.sh.sha256
           fi

@@ -52,6 +52,14 @@ def load_artifact_shim():
 shim = load_shim()
 
 
+class CliMain(unittest.TestCase):
+    def test_usage_errors(self):
+        from claude_copilot_shim import cli
+        self.assertEqual(cli.main([]), 2)
+        self.assertEqual(cli.main(["serve", "0"]), 2)
+        self.assertEqual(cli.main(["bogus"]), 2)
+
+
 class BuildArtifact(unittest.TestCase):
     def test_artifact_embeds_source_exactly(self):
         import build
@@ -439,9 +447,9 @@ class Server(Base):
         self.assertEqual(d["modelPicker"]["options"][0]["model"], "a")
 
     def test_get_auth_error_is_401(self):
-        orig = shim.copilot_token
-        shim.copilot_token = lambda: (_ for _ in ()).throw(RuntimeError("no token"))
-        self.addCleanup(setattr, shim, "copilot_token", orig)
+        orig = shim.AUTH.copilot_token
+        shim.AUTH.copilot_token = lambda: (_ for _ in ()).throw(RuntimeError("no token"))
+        self.addCleanup(setattr, shim.AUTH, "copilot_token", orig)
         s, data, _ = self.req("GET", "/v1/models")
         self.assertEqual(s, 401)
         self.assertIn("no token", json.loads(data)["error"]["message"])
@@ -456,20 +464,20 @@ class Server(Base):
     def test_token_failure_after_models_cached_is_401_on_every_route(self):
         self.models(model_entry("claude-x", ["/v1/messages"]), model_entry("gpt", ["/responses"]), model_entry("gem", ["/chat/completions"]))
         shim.models()  # cache the list while the token still works
-        orig = shim.copilot_token
-        shim.copilot_token = lambda: (_ for _ in ()).throw(RuntimeError("login rejected"))
-        self.addCleanup(setattr, shim, "copilot_token", orig)
+        orig = shim.AUTH.copilot_token
+        shim.AUTH.copilot_token = lambda: (_ for _ in ()).throw(RuntimeError("login rejected"))
+        self.addCleanup(setattr, shim.AUTH, "copilot_token", orig)
         for model in ("claude-x", "gpt", "gem"):
             s, data, _ = self.post({"model": model, "messages": [{"role": "user", "content": "x"}]})
             self.assertEqual(s, 401, model)
             self.assertIn("login rejected", json.loads(data)["error"]["message"])
 
     def test_models_auth_failure_is_not_cached(self):
-        orig = shim.copilot_token
-        shim.copilot_token = lambda: (_ for _ in ()).throw(RuntimeError("no token"))
+        orig = shim.AUTH.copilot_token
+        shim.AUTH.copilot_token = lambda: (_ for _ in ()).throw(RuntimeError("no token"))
         with self.assertRaises(RuntimeError):
             shim.models()
-        shim.copilot_token = orig
+        shim.AUTH.copilot_token = orig
         self.models(model_entry("a", []))
         self.assertEqual([m["id"] for m in shim.models()], ["a"])  # retried immediately after the token works again
 

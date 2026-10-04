@@ -82,7 +82,7 @@ class CopilotClient:
         self.opener = auth.opener
 
     def headers(self, stream, vision=False, agent=False):
-        h = dict(self.auth.config.base_headers, authorization="Bearer " + copilot_token(),
+        h = dict(self.auth.config.base_headers, authorization="Bearer " + self.auth.copilot_token(),
             **{"content-type": "application/json", "accept": "text/event-stream" if stream else "application/json",
                "copilot-integration-id": "vscode-chat", "openai-intent": "conversation-panel",
                "x-initiator": "agent" if agent else "user", "x-request-id": str(uuid.uuid4())})

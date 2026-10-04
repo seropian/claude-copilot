@@ -3,10 +3,9 @@ set -eu
 
 version="${1:-}"
 case "$version" in
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "release: version must look like x.y.z" >&2; exit 1 ;;
+  *[!0-9A-Za-z.+-]*|'') echo "release: invalid version: $version" >&2; exit 1 ;;
 esac
-case "$version" in *[!0-9A-Za-z.+-]*) echo "release: invalid version: $version" >&2; exit 1 ;; esac
+printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' || { echo "release: version must look like x.y.z" >&2; exit 1; }
 
 tag="v$version"
 branch=$(git branch --show-current)
@@ -17,13 +16,14 @@ if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; the
   echo "release: remote tag already exists: $tag" >&2
   exit 1
 fi
+trap 'git checkout -- VERSION 2>/dev/null' ERR
 printf '%s\n' "$version" > VERSION
 python3 build.py
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 bash tests/test_shell.sh
 python3 build.py --check
 
-git add -A
+git add VERSION
 git commit -m "Release $tag
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>"

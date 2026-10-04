@@ -1,14 +1,12 @@
 import hmac, http.server, json, urllib.error, uuid
 from .config import KEY, MAX_BODY, log
-from .auth import CLIENT, cp_open
+from .auth import cp_open
 from .helpers import adapt_thinking, drop_path, err, fix, has_image, is_agent, THINK, thinking_fix
-from .models import CATALOG, endpoints, picker_models
+from .models import endpoints, picker_models
 from .stream import sse_events, count_tokens
 from .transforms import CHAT_STOP, chat_usage, from_chat, from_responses, picker_settings, stop_reason, to_chat, to_responses, usage
 
 class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
-    client = CLIENT
-    catalog = CATALOG
     def sse(self, ev, **d):
         self.wfile.write(("event: %s\ndata: %s\n\n" % (ev, json.dumps({"type": ev, **d}))).encode()); self.wfile.flush()
     def reply(self, code, obj):
@@ -146,7 +144,8 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
         if host not in ("127.0.0.1", "localhost", "::1"):
             self.reply(403, err("bad host header")); return False
         if KEY:
-            given = self.headers.get("x-api-key") or (self.headers.get("authorization") or "")[7:]
+            auth = self.headers.get("authorization") or ""
+            given = self.headers.get("x-api-key") or (auth[7:] if auth.lower().startswith("bearer ") else "")
             if not hmac.compare_digest(given.encode(), KEY.encode()):
                 self.reply(401, err("invalid api key")); return False
         return True
