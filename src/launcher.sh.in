@@ -80,7 +80,12 @@ _cc_check_update() {
   [ -w "$dir" ] || return 0
   latest=$(curl -fsSL -m 5 https://api.github.com/repos/seropian/claude-copilot/releases/latest 2>/dev/null |
     python3 -c 'import json, sys; tag = json.load(sys.stdin).get("tag_name", ""); print(tag[1:] if tag.startswith("v") else tag)' 2>/dev/null) || return 0
-  [ -n "$latest" ] && [ "$latest" != "$_cc_version" ] || return 0
+  [ -n "$latest" ] || return 0
+  python3 -c '
+import re, sys
+def v(s):
+    return tuple(int(x) for x in re.findall(r"\d+", s.split("-")[0].split("+")[0]))
+sys.exit(0 if v(sys.argv[1]) > v(sys.argv[2]) else 1)' "$latest" "$_cc_version" 2>/dev/null || return 0
   tmp=$(mktemp "$dir/.claude-copilot-update.XXXXXX") || return 0
   if ! curl -fsSL -m 20 \
     https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh -o "$tmp" ||
