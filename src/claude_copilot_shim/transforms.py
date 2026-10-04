@@ -1,3 +1,7 @@
+import json, uuid
+from .helpers import blocks, data_url, mk_usage, result_text, tool_choice, tool_defs, txt
+from .models import picker_models
+
 def add_msg(items, role, parts):
     if parts: items.append({"type": "message", "role": role, "content": parts[:]}); del parts[:]
 def to_responses(j):
@@ -92,20 +96,7 @@ def from_chat(r, model):
     return {"id": "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant", "model": model, "content": content,
             "stop_reason": stop, "stop_sequence": None, "usage": chat_usage(r.get("usage"))}
 
-class MessageTranslator:
-    def blocks(self, content): return blocks(content)
-    def text(self, content): return txt(content)
-    def to_responses(self, request): return to_responses(request)
-    def from_responses(self, response, model): return from_responses(response, model)
-    def to_chat(self, request): return to_chat(request)
-    def from_chat(self, response, model): return from_chat(response, model)
-
-
-TRANSLATOR = MessageTranslator()
-
 def picker_settings():
     o = [{"model": m["id"], "label": m["display_name"]} for m in picker_models()]
     return {"modelPicker": {"options": o}} if o else {}
 
-
-def translator(): return TRANSLATOR

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # claude-copilot: run Claude Code on GitHub Copilot models. See README.md.
 
+_cc_version="__CLAUDE_COPILOT_VERSION__"
+_cc_update_state=""
+
 # Prerequisites: python3 (3.6+), curl, claude. Prints what is missing and how to get it.
 _cc_check() {
   local c missing=""
@@ -27,20 +30,154 @@ _cc_cleanup() {
   [ -z "$p" ] && [ -n "$2" ] && [ -f "$2.pid" ] && p=$(cat "$2.pid" 2>/dev/null)
   case "$p" in ''|*[!0-9]*) ;; *) kill "$p" 2>/dev/null ;; esac
   [ -n "$2" ] && rm -f "$2" "$2.pid" "$2.tmp"
+  _cc_lock_drop
   return 0
 }
 
-_cc_fail() { trap - HUP TERM INT; return 1; }
+# mkdir lock so concurrent launchers never start two shims. Stale if its owner pid is dead.
+_cc_lock=""
+_cc_lock_take() {
+  local d="$1" i p
+  for i in $(seq 1 200); do
+    if mkdir "$d" 2>/dev/null; then echo $$ > "$d/pid"; _cc_lock="$d"; return 0; fi
+    p=$(cat "$d/pid" 2>/dev/null)
+    case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null || rm -rf "$d" ;; esac
+    sleep 0.1
+  done
+  return 1
+}
+_cc_lock_drop() {
+  [ -n "$_cc_lock" ] && rm -rf "$_cc_lock"
+  _cc_lock=""
+}
+
+# dynamic scope: reads wrap, model, sa from claude-copilot
+_cc_run() {
+  if [ "$wrap" = 1 ]; then "$@"; else command claude --model "$model" ${sa[@]+"${sa[@]}"} "$@"; fi
+}
+
+_cc_port_busy() {
+  python3 -c 'import socket, sys; sys.exit(0 if socket.socket().connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$1"
+}
+
+# args: port, key. True if one of our shims answers on that port with that key.
+_cc_shim_ok() {
+  [ "$(printf 'header = "x-api-key: %s"\n' "$2" | curl -s -m 3 -K - -o /dev/null -w '%{http_code}' "http://127.0.0.1:$1/nope" 2>/dev/null)" = 404 ]
+}
+
+_cc_fail() {
+  [ -n "$_cc_update_state" ] && rm -f "$_cc_update_state"
+  _cc_lock_drop
+  trap - HUP TERM INT
+  return 1
+}
+
+_cc_check_update() {
+  local script="$1" state="$2" dir latest tmp expected actual
+  [ -f "$script" ] && [ ! -L "$script" ] || return 0
+  dir="${script%/*}"
+  [ "$dir" = "$script" ] && dir="."
+  [ -w "$dir" ] || return 0
+  latest=$(curl -fsSL -m 5 https://api.github.com/repos/seropian/claude-copilot/releases/latest 2>/dev/null |
+    python3 -c 'import json, sys; tag = json.load(sys.stdin).get("tag_name", ""); print(tag[1:] if tag.startswith("v") else tag)' 2>/dev/null) || return 0
+  [ -n "$latest" ] && [ "$latest" != "$_cc_version" ] || return 0
+  tmp=$(mktemp "$dir/.claude-copilot-update.XXXXXX") || return 0
+  if ! curl -fsSL -m 20 \
+    https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh -o "$tmp" ||
+    [ "$(head -c 2 "$tmp")" != "#!" ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+  expected=$(curl -fsSL -m 5 \
+    https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh.sha256 2>/dev/null |
+    awk 'NR == 1 {print $1}') || { rm -f "$tmp"; return 0; }
+  actual=$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$tmp" 2>/dev/null) ||
+    { rm -f "$tmp"; return 0; }
+  if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+  chmod +x "$tmp" || { rm -f "$tmp"; return 0; }
+  printf '%s\n' "$tmp" > "$state" || rm -f "$tmp"
+}
+
+_cc_start_update_check() {
+  local script="$1" dir state
+  [ "${_cc_update_enabled:-0}" = 1 ] || return 0
+  dir="${script%/*}"
+  [ "$dir" = "$script" ] && dir="."
+  [ -w "$dir" ] || return 0
+  state=$(mktemp "$dir/.claude-copilot-update-state.XXXXXX") || return 0
+  rm -f "$state"
+  _cc_update_state="$state"
+  (_cc_check_update "$script" "$state" >/dev/null 2>&1 || true) &
+}
+
+_cc_schedule_update() {
+  local script="$1" state="$2" pid="$$"
+  [ -n "$state" ] || return 0
+  python3 - "$pid" "$script" "$state" <<'PY' >/dev/null 2>&1 &
+import os
+import sys
+import time
+
+pid, target, state = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+while True:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        break
+    except PermissionError:
+        break
+    time.sleep(0.1)
+update = ""
+deadline = time.time() + 60
+while time.time() < deadline:
+    try:
+        with open(state) as f:
+            update = f.read().strip()
+        if update:
+            break
+    except OSError:
+        pass
+    time.sleep(0.1)
+try:
+    if update:
+        os.replace(update, target)
+except OSError:
+    try:
+        if update:
+            os.unlink(update)
+    except OSError:
+        pass
+try:
+    os.unlink(state)
+except OSError:
+    pass
+PY
+}
 
 claude-copilot() {
   unset _cc_sig
   _cc_check || return 1
+  if [ "${1:-}" = --stop-shim ]; then
+    local _f="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}/shim.state" _p=""
+    [ -f "$_f" ] && read -r _p _ < "$_f"
+    case "$_p" in ''|*[!0-9]*) echo "claude-copilot: no shim running"; return 0 ;; esac
+    kill "$_p" 2>/dev/null; rm -f "$_f"; echo "claude-copilot: shim stopped"; return 0
+  fi
   local sport="${COPILOT_SHIM_PORT:-0}"
   local model="${COPILOT_CLAUDE_MODEL:-claude-sonnet-5.5}"
   local log="${TMPDIR:-/tmp}/claude-copilot.log"
   local spid="" pf="" i rc ms key
   local -a sa=()
+  local script="${BASH_SOURCE[0]:-$0}" wrap=0
+  case "$script" in /*) ;; *) script="$PWD/${script#./}" ;; esac
+  # CLAUDE_CODE_PROCESS_WRAPPER mode: claude spawns "<this script> <cmd> <args...>". Ensure the shim, then run cmd.
+  # Claude Code passes the absolute path of its own binary first, and doesn't always forward our env, so detect by that.
+  case "${1:-}" in /*) [ -f "$1" ] && [ -x "$1" ] && wrap=1 ;; esac
 
+  [ "$wrap" = 1 ] || _cc_start_update_check "$script"
   # Shim source (python). Usage: login | serve <port, 0 = any free> <file to write "pid port" to>.
   # login: GitHub device-code login, token kept in ~/.local/share/claude-copilot.
   # serve: local Anthropic-style API in front of GitHub Copilot, see README, "How it works".
@@ -57,35 +194,88 @@ __CLAUDE_COPILOT_SHIM__
   # 1) login: no-op when a token is already stored
   python3 -c "$shim" login || { _cc_fail; return; }
 
-  # 2) shim: own instance per run on a free port (or COPILOT_SHIM_PORT), it writes "pid port" to a temp file
+  # 2) shim: one shared, long-lived instance per user. It outlives this launcher on purpose: claude sessions
+  # (backgrounded, resumed, attached later) keep the base URL + key they started with, so the shim must stay up.
+  # State file "pid port key version" lets any later run reuse it, or restart it on the same port and key.
   case "$sport" in ''|*[!0-9]*) echo "claude-copilot: COPILOT_SHIM_PORT must be a port number, got '$sport'" >&2; _cc_fail; return ;; esac
-  if [ "$sport" != 0 ] && python3 -c 'import socket, sys; sys.exit(0 if socket.socket().connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$sport"; then
-    echo "claude-copilot: port $sport busy, unset COPILOT_SHIM_PORT to pick a free one" >&2
-    _cc_fail; return
-  fi
   if [ -L "$log" ]; then
     echo "claude-copilot: refusing to write to $log, it is a symlink" >&2; _cc_fail; return
   fi
-  key=$(python3 -c 'import secrets; print(secrets.token_hex(24))') || { _cc_fail; return; }
-  pf=$(mktemp "${TMPDIR:-/tmp}/claude-copilot.XXXXXX") || { _cc_fail; return; }
-  ( umask 077; COPILOT_SHIM_KEY="$key" nohup python3 -c "$shim" serve "$sport" "$pf" >>"$log" 2>&1 & echo $! >"$pf.pid" )
-  sport=""
-  for i in $(seq 1 100); do
-    read -r spid sport < "$pf" 2>/dev/null
-    [ -n "$sport" ] && break
-    sleep 0.1
-  done
-  if [ -z "$sport" ]; then
-    echo "claude-copilot: shim didn't start, see $log" >&2
-    tail -n 5 "$log" 2>/dev/null | sed 's/^/  /' >&2
-    _cc_cleanup "$spid" "$pf"
-    _cc_fail; return
+  local sdir="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}" sf opid="" oport="" okey="" over="" want="$sport" healthy=0
+  sf="$sdir/shim.state"
+  ( umask 077; mkdir -p "$sdir" ) 2>/dev/null
+  _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for $sdir/shim.lock" >&2; _cc_fail; return; }
+  [ -f "$sf" ] && [ ! -L "$sf" ] && read -r opid oport okey over < "$sf" 2>/dev/null
+  case "$oport" in ''|*[!0-9]*) oport=""; okey="" ;; esac
+  [ -n "$oport" ] && [ -n "$okey" ] && _cc_shim_ok "$oport" "$okey" && healthy=1
+  if [ "$healthy" = 1 ] && [ "$over" = "$_cc_version" ] && { [ "$want" = 0 ] || [ "$want" = "$oport" ]; }; then
+    sport="$oport"; key="$okey"
+  else
+    key=""
+    if [ "$healthy" = 1 ] && [ "$over" != "$_cc_version" ] && [ "$want" = 0 ]; then
+      # stale version: restart it on the same port and key so running sessions reconnect
+      case "$opid" in ''|*[!0-9]*) ;; *) kill "$opid" 2>/dev/null ;; esac
+      for i in $(seq 1 30); do _cc_port_busy "$oport" || break; sleep 0.1; done
+    fi
+    if [ "$want" = 0 ] && [ -n "$oport" ] && ! _cc_port_busy "$oport"; then
+      want="$oport"; key="$okey"
+    elif [ "$want" = 0 ] && [ -n "$oport" ]; then
+      echo "claude-copilot: previous shim port $oport is taken by another process, using a new port. Sessions started earlier can't reconnect; restart them." >&2
+    elif [ "$want" != 0 ] && _cc_port_busy "$want"; then
+      echo "claude-copilot: port $want busy, unset COPILOT_SHIM_PORT to pick a free one" >&2
+      _cc_fail; return
+    fi
+    [ -n "$key" ] || key=$(python3 -c 'import secrets; print(secrets.token_hex(24))') || { _cc_fail; return; }
+    pf=$(mktemp "${TMPDIR:-/tmp}/claude-copilot.XXXXXX") || { _cc_fail; return; }
+    ( umask 077; COPILOT_SHIM_KEY="$key" nohup python3 -c "$shim" serve "$want" "$pf" >>"$log" 2>&1 & echo $! >"$pf.pid" )
+    sport=""
+    for i in $(seq 1 100); do
+      read -r spid sport < "$pf" 2>/dev/null
+      [ -n "$sport" ] && break
+      sleep 0.1
+    done
+    if [ -z "$sport" ]; then
+      _cc_cleanup "$spid" "$pf"; spid=""; pf=""
+      # lost a startup race with another launcher? use the shim it started
+      read -r opid oport okey over < "$sf" 2>/dev/null
+      if [ -n "$oport" ] && [ -n "$okey" ] && _cc_shim_ok "$oport" "$okey"; then
+        sport="$oport"; key="$okey"
+      else
+        echo "claude-copilot: shim didn't start, see $log" >&2
+        tail -n 5 "$log" 2>/dev/null | sed 's/^/  /' >&2
+        _cc_fail; return
+      fi
+    else
+      ( umask 077; printf '%s %s %s %s\n' "$spid" "$sport" "$key" "$_cc_version" > "$sf.tmp" && mv -f "$sf.tmp" "$sf" )
+      rm -f "$pf" "$pf.pid" "$pf.tmp"
+      spid=""; pf=""
+    fi
   fi
+
+  _cc_lock_drop
 
   # 3) claude, with env scoped to this one command (shell env stays clean).
   # Feed every model Copilot offers into the /model picker (modelPicker setting, user scope).
   ms=$(printf 'header = "x-api-key: %s"\n' "$key" | curl -sf -m 20 -K - "http://127.0.0.1:$sport/claude-settings")
-  case "$ms" in "{}"|"") ;; "{"*) sa=(--settings "$ms") ;; esac
+  [ "$wrap" = 1 ] && ms=""
+  case "$ms" in
+    "{"*)
+      ms=$(CC_SETTINGS_BASE="http://127.0.0.1:$sport" CC_SETTINGS_KEY="$key" \
+        CC_SETTINGS_MODEL="$model" \
+        CC_SETTINGS_SONNET="${COPILOT_SONNET_MODEL:-claude-sonnet-5.5}" \
+        CC_SETTINGS_OPUS="${COPILOT_OPUS_MODEL:-claude-opus-5.5}" \
+        CC_SETTINGS_FABLE="${COPILOT_FABLE_MODEL:-claude-opus-5.5}" \
+        CC_SETTINGS_HAIKU="${COPILOT_HAIKU_MODEL:-claude-haiku-4.5}" \
+        python3 -c 'import json, os, sys; s=json.load(sys.stdin); s.setdefault("env", {}).update({
+          "ANTHROPIC_BASE_URL": os.environ["CC_SETTINGS_BASE"], "ANTHROPIC_AUTH_TOKEN": os.environ["CC_SETTINGS_KEY"],
+          "ANTHROPIC_MODEL": os.environ["CC_SETTINGS_MODEL"],
+          "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ["CC_SETTINGS_SONNET"], "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ["CC_SETTINGS_OPUS"],
+          "ANTHROPIC_DEFAULT_FABLE_MODEL": os.environ["CC_SETTINGS_FABLE"], "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ["CC_SETTINGS_HAIKU"],
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+          "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1"}); print(json.dumps(s, separators=(",", ":")))' <<<"$ms") || ms=""
+      [ -n "$ms" ] && sa=(--settings "$ms")
+      ;;
+  esac
   # INT is a no-op here (claude resets it to default) so claude's exit code survives ctrl-c.
   trap : INT
   ANTHROPIC_BASE_URL="http://127.0.0.1:$sport" \
@@ -98,11 +288,14 @@ __CLAUDE_COPILOT_SHIM__
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   CLAUDE_CODE_AUTO_MODE_SERVER=0 \
   CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 \
-  command claude --model "$model" ${sa[@]+"${sa[@]}"} "$@"
+  CLAUDE_CODE_PROCESS_WRAPPER="$script" \
+  CLAUDE_COPILOT_WRAP=1 \
+  _cc_run "$@"
   rc=$?
 
-  # 4) cleanup
-  _cc_cleanup "$spid" "$pf"
+  # 4) the shim stays up on purpose
+  _cc_schedule_update "$script" "$_cc_update_state"
+  _cc_update_state=""
   trap - HUP TERM INT
   return $rc
 }
@@ -116,6 +309,7 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   [ "${BASH_SOURCE[0]}" != "$0" ] && _cc_sourced=1
 fi
 if [ "$_cc_sourced" = 0 ]; then
+  _cc_update_enabled=1
   claude-copilot "$@"
   _cc_rc=$?
   exit "${_cc_sig:-$_cc_rc}"

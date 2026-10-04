@@ -17,4 +17,4 @@ release:
 	@./scripts/release.sh "$(VERSION)"
 
 clean:
-	rm -rf src/shim/__pycache__ tests/__pycache__
+	find . -name __pycache__ -prune -exec rm -rf {} +
