@@ -119,8 +119,8 @@ rm -f "$UC"/.claude-copilot-update.*
 uc_state() { # extra env assignment
   env -i HOME="$UC" PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST= "$@" /bin/bash -c ". '$SCRIPT'; _cc_update_enabled=1; _cc_start_update_check '$UC/app'; wait; printf '[%s]' \"\${_cc_update_state:-}\""
 }
-[ "$(uc_state X=1)" = "[]" ]; check "update check is off by default" $?
-case "$(uc_state COPILOT_AUTO_UPDATE=1)" in "[]") false ;; *) true ;; esac; check "COPILOT_AUTO_UPDATE turns the update check on" $?
+case "$(uc_state X=1)" in "[]") false ;; *) true ;; esac; check "update check is on by default" $?
+[ "$(uc_state COPILOT_AUTO_UPDATE=0)" = "[]" ]; check "COPILOT_AUTO_UPDATE=0 turns the update check off" $?
 rm -f "$UC"/.claude-copilot-update-state.*
 
 # ---------- sourcing vs executing ----------

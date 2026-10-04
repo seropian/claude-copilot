@@ -133,7 +133,7 @@ sys.exit(0 if v(sys.argv[1]) > v(sys.argv[2]) else 1)' "$latest" "$_cc_version" 
 _cc_start_update_check() {
   local script="$1" dir state
   [ "${_cc_update_enabled:-0}" = 1 ] || return 0
-  [ -n "${COPILOT_AUTO_UPDATE:-}" ] || return 0
+  [ "${COPILOT_AUTO_UPDATE:-}" != 0 ] || return 0
   dir="${script%/*}"
   [ "$dir" = "$script" ] && dir="."
   [ -w "$dir" ] || return 0
