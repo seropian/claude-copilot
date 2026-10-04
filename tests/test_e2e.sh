@@ -43,11 +43,11 @@ shim_py="${src#*local shim=\'}"; shim_py="${shim_py%%
 \'
 *}"
 pf="$TMP/disc.pf"
-python3 -c "$shim_py" serve 0 "$pf" >"$TMP/disc.log" 2>&1 &
+COPILOT_SHIM_KEY=e2e-disc python3 -c "$shim_py" serve 0 "$pf" >"$TMP/disc.log" 2>&1 &
 dpid=$!
 port=""
 for _ in $(seq 1 50); do read -r _ port 2>/dev/null < "$pf"; [ -n "$port" ] && break; sleep 0.1; done
-avail=$(curl -sf -m 30 "http://127.0.0.1:$port/v1/models" 2>/dev/null)
+avail=$(curl -sf -m 30 -H "x-api-key: e2e-disc" "http://127.0.0.1:$port/v1/models" 2>/dev/null)
 kill "$dpid" 2>/dev/null
 if [ -z "$avail" ]; then bad "shim lists models from real Copilot" "$(cat "$TMP/disc.log")"; echo "$pass passed, $fail failed"; exit 1; fi
 ok "shim lists models from real Copilot"
