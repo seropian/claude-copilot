@@ -116,6 +116,8 @@ sys.exit(0 if v(sys.argv[1]) > v(sys.argv[2]) else 1)' "$latest" "$_cc_version" 
     return 0
   fi
   chmod +x "$tmp" || { rm -f "$tmp"; return 0; }
+  # launcher already gone (ctrl-c etc): nobody will apply or clean this up
+  kill -0 "$3" 2>/dev/null || { rm -f "$tmp"; return 0; }
   printf '%s\n' "$tmp" > "$state" || rm -f "$tmp"
 }
 
@@ -126,10 +128,12 @@ _cc_start_update_check() {
   dir="${script%/*}"
   [ "$dir" = "$script" ] && dir="."
   [ -w "$dir" ] || return 0
+  # leftovers from checks/updaters that never got to clean up (signals, late finishes)
+  find "$dir" -maxdepth 1 -name '.claude-copilot-update*' -mmin +60 -exec rm -f {} + 2>/dev/null
   state=$(mktemp "$dir/.claude-copilot-update-state.XXXXXX") || return 0
   rm -f "$state"
   _cc_update_state="$state"
-  (_cc_check_update "$script" "$state" >/dev/null 2>&1 || true) &
+  (_cc_check_update "$script" "$state" "$$" >/dev/null 2>&1 || true) &
 }
 
 _cc_schedule_update() {
@@ -180,10 +184,12 @@ claude-copilot() {
   unset _cc_sig
   _cc_check || return 1
   if [ "${1:-}" = --stop-shim ]; then
-    local _f="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}/shim.state" _p=""
-    [ -f "$_f" ] && read -r _p _ < "$_f"
+    local _f="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}/shim.state" _p="" _o="" _k=""
+    [ -f "$_f" ] && read -r _p _o _k _ < "$_f"
     case "$_p" in ''|*[!0-9]*) echo "claude-copilot: no shim running"; return 0 ;; esac
-    kill "$_p" 2>/dev/null; rm -f "$_f"; echo "claude-copilot: shim stopped"; return 0
+    # only kill if the port still answers as our shim (pid may be reused)
+    case "$_o" in ''|*[!0-9]*) ;; *) _cc_shim_ok "$_o" "$_k" && kill "$_p" 2>/dev/null ;; esac
+    rm -f "$_f"; echo "claude-copilot: shim stopped"; return 0
   fi
   local sport="${COPILOT_SHIM_PORT:-0}"
   local model="${COPILOT_CLAUDE_MODEL:-claude-sonnet-5.5}"
@@ -225,7 +231,7 @@ __CLAUDE_COPILOT_SHIM__
   fi
   local sf opid="" oport="" okey="" over="" want="$sport" healthy=0
   sf="$sdir/shim.state"
-  _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for $sdir/shim.lock" >&2; _cc_fail; return; }
+  _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for $sdir/shim.lock (if no other claude-copilot is starting, rm -rf it)" >&2; _cc_fail; return; }
   [ -f "$sf" ] && [ ! -L "$sf" ] && read -r opid oport okey over < "$sf" 2>/dev/null
   case "$oport" in ''|*[!0-9]*) oport=""; okey="" ;; esac
   [ -n "$oport" ] && [ -n "$okey" ] && _cc_shim_ok "$oport" "$okey" && healthy=1
@@ -298,6 +304,7 @@ __CLAUDE_COPILOT_SHIM__
 p=os.path.join(os.environ["CC_SETTINGS_DIR"], "settings-" + hashlib.sha256(d.encode()).hexdigest()[:16] + ".json")
 fd=os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, d.encode()); os.close(fd); os.replace(p + ".tmp", p); print(p)' <<<"$ms") || ms=""
       [ -n "$ms" ] && sa=(--settings "$ms")
+      find "$sdir" -maxdepth 1 -name 'settings-*.json' -mtime +7 ! -path "$ms" -exec rm -f {} + 2>/dev/null
       ;;
   esac
   # INT is a no-op here (claude resets it to default) so claude's exit code survives ctrl-c.

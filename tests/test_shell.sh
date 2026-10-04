@@ -108,7 +108,7 @@ ln -sf "$PY" "$UC/bin/python3"
 printf '#!/bin/sh\n' > "$UC/app"
 uc_staged() { # running version, latest published
   rm -f "$UC/state"
-  PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST="$2" /bin/bash -c ". '$SCRIPT'; _cc_version='$1'; _cc_check_update '$UC/app' '$UC/state'" >/dev/null 2>&1
+  PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST="$2" /bin/bash -c ". '$SCRIPT'; _cc_version='$1'; _cc_check_update '$UC/app' '$UC/state' \$\$" >/dev/null 2>&1
   [ -s "$UC/state" ]
 }
 uc_staged 1.0.0 1.1.0; check "update check stages a newer release" $?
@@ -116,6 +116,8 @@ uc_staged 1.1.0 1.1.0; [ $? -ne 0 ]; check "update check ignores the same versio
 uc_staged 1.2.0 1.1.0; [ $? -ne 0 ]; check "update check ignores an older release" $?
 uc_staged 1.9.0 1.10.0; check "update check compares numerically (1.10.0 > 1.9.0)" $?
 rm -f "$UC"/.claude-copilot-update.*
+rm -f "$UC/state"; PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST=1.1.0 /bin/bash -c ". '$SCRIPT'; _cc_version=1.0.0; _cc_check_update '$UC/app' '$UC/state' 999999" >/dev/null 2>&1
+[ ! -e "$UC/state" ] && [ -z "$(ls -A "$UC" | grep '^.claude-copilot-update')" ]; check "update check drops its download when the launcher is gone" $?
 uc_state() { # extra env assignment
   env -i HOME="$UC" PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST= "$@" /bin/bash -c ". '$SCRIPT'; _cc_update_enabled=1; _cc_start_update_check '$UC/app'; wait; printf '[%s]' \"\${_cc_update_state:-}\""
 }
