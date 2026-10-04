@@ -186,8 +186,18 @@ contains "$out" "--extra-flag value"; check "forwards user args to claude" $?
 
 port=$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")
 sleep 0.3
-"$CURL" -s -m 2 "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1; check_rc=$?
-check "shim is killed after claude exits" $((check_rc != 0 ? 0 : 1))
+code=$("$CURL" -s -m 2 -o /dev/null -w '%{http_code}' -H "x-api-key: $(sed -n 's/^TOKEN=//p' "$FLOW/claude.out")" "http://127.0.0.1:$port/nope")
+[ "$code" = 404 ]; check "shim stays up after claude exits" $? "code=$code"
+
+run_flow; rc=$?
+[ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" = "$port" ] && [ "$(sed -n 's/^TOKEN=//p' "$FLOW/claude.out")" != "" ]
+check "next run reuses the running shim" $? "rc=$rc"
+
+# shim killed behind our back: next run restarts it on the same port with the same key
+read -r kp _ < "$FLOW/.local/share/claude-copilot/shim.state"; kill "$kp"; sleep 0.5
+run_flow; rc=$?
+[ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" = "$port" ]; check "dead shim is restarted on the same port" $? "rc=$rc"
+[ "$(cat "$FLOW/shim.status")" = 404 ]; check "restarted shim accepts the old key" $?
 
 run_flow COPILOT_CLAUDE_MODEL=my-model COPILOT_SONNET_MODEL=s1 COPILOT_OPUS_MODEL=o1 COPILOT_HAIKU_MODEL=h1
 out=$(cat "$FLOW/claude.out")
@@ -256,7 +266,7 @@ chmod +x "$FLOW/pybin/python3"
 
 # shim never comes up: launcher gives up with a message, no claude, nothing left behind
 rm -f "$FLOW/claude.out"
-env -i HOME="$FLOW" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" FAKE_SERVE=die \
+env -i HOME="$FLOW" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" COPILOT_STATE_DIR="$FLOW/st-die" FAKE_SERVE=die \
   /bin/bash "$SCRIPT" 2>"$FLOW/stderr"; rc=$?
 [ "$rc" -eq 1 ]; check "launcher fails when the shim dies at startup" $? "rc=$rc"
 contains "$(cat "$FLOW/stderr")" "shim didn't start"; check "startup failure is reported" $?
@@ -266,7 +276,7 @@ contains "$(cat "$FLOW/stderr")" "shim didn't start"; check "startup failure is 
 # signal during startup: shim is killed, files removed, right exit code
 for sig in TERM INT HUP; do
   case $sig in TERM) want=143 ;; INT) want=130 ;; HUP) want=129 ;; esac
-  env -i HOME="$FLOW" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" FAKE_SERVE=hang \
+  env -i HOME="$FLOW" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" COPILOT_STATE_DIR="$FLOW/st-hang-$sig" FAKE_SERVE=hang \
     perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV' /bin/bash "$SCRIPT" 2>/dev/null & lp=$!
   spid=""
   for _ in $(seq 1 50); do spid=$(cat "$FLOW"/tmp/claude-copilot.*.pid 2>/dev/null); [ -n "$spid" ] && break; sleep 0.1; done
@@ -341,6 +351,48 @@ env -i HOME="$IN/tilde" PATH="$IN/bin:/usr/bin:/bin" INSTALL_DIR='~/bin' /bin/ba
 echo old > "$IN/home/.local/bin/claude-copilot"
 env -i HOME="$IN/home" PATH="$IN/bin:/usr/bin:/bin" /bin/bash "$INSTALL" >/dev/null 2>&1
 [ "$(head -c 2 "$IN/home/.local/bin/claude-copilot")" = "#!" ]; check "install.sh replaces an existing install" $?
+
+# claude gets CLAUDE_CODE_PROCESS_WRAPPER pointing at the launcher
+CW="$TMP/cw"; mkdir -p "$CW/bin" "$CW/tmp" "$CW/home"
+ln -sf "$PY" "$CW/bin/python3"; ln -sf "$CURL" "$CW/bin/curl"
+cat > "$CW/bin/claude" <<FAKE
+#!/bin/sh
+echo "\$ANTHROPIC_BASE_URL \$CLAUDE_CODE_PROCESS_WRAPPER \$CLAUDE_COPILOT_WRAP" >> "$CW/claude.log"
+sleep 0.3
+FAKE
+chmod +x "$CW/bin/claude"
+cat > "$CW/bin/child" <<FAKE
+#!/bin/sh
+echo "\$ANTHROPIC_BASE_URL \$ANTHROPIC_AUTH_TOKEN|\$*" > "$CW/child.out"
+exit 5
+FAKE
+chmod +x "$CW/bin/child"
+echo tok > "$CW/token"
+cw_run() { env -i HOME="$CW/home" PATH="$CW/bin:/usr/bin:/bin" TMPDIR="$CW/tmp" COPILOT_TOKEN_FILE="$CW/token" "$@"; }
+
+# many launchers at once end up on one shim
+for i in 1 2 3 4 5 6; do cw_run /bin/bash "$SCRIPT" >/dev/null 2>&1 & done
+wait
+[ "$(wc -l < "$CW/claude.log")" -eq 6 ]; check "all concurrent launchers ran claude" $? "$(cat "$CW/claude.log")"
+[ "$(awk '{print $1}' "$CW/claude.log" | sort -u | wc -l)" -eq 1 ]; check "concurrent launchers share one shim" $? "$(cat "$CW/claude.log")"
+[ ! -e "$CW/home/.local/share/claude-copilot/shim.lock" ]; check "shim lock released" $?
+
+# stale lock from a dead pid is cleared
+mkdir "$CW/home/.local/share/claude-copilot/shim.lock"; echo 999999 > "$CW/home/.local/share/claude-copilot/shim.lock/pid"
+cw_run /bin/bash "$SCRIPT" >/dev/null 2>&1; check "stale shim lock is cleared" $?
+
+awk '{print $2, $3}' "$CW/claude.log" | sort -u | grep -qx "$SCRIPT 1"; check "claude gets CLAUDE_CODE_PROCESS_WRAPPER=<launcher>" $? "$(cat "$CW/claude.log")"
+
+# wrapper mode: runs the given command (not claude) against the shared shim, keeps its exit code
+: > "$CW/claude.log"
+cw_run /bin/bash "$SCRIPT" "$CW/bin/child" a b >/dev/null 2>&1; rc=$?
+check "wrapper mode propagates the command's exit code" $((rc == 5 ? 0 : 1)) "rc=$rc"
+contains "$(cat "$CW/child.out")" "|a b"; check "wrapper mode forwards the command args unchanged" $?
+contains "$(cat "$CW/child.out")" "http://127.0.0.1:"; check "wrapper mode points the command at the shim" $?
+[ ! -s "$CW/claude.log" ]; check "wrapper mode does not start claude" $?
+
+cw_run /bin/bash "$SCRIPT" child >/dev/null 2>&1
+[ -s "$CW/claude.log" ]; check "relative command name is not wrapper mode" $?
 
 echo
 echo "$pass passed, $fail failed"

@@ -27,16 +27,6 @@ def read_version():
     return version
 
 
-def package_files():
-    if not PACKAGE.is_dir():
-        raise SystemExit("missing shim package: %s" % PACKAGE)
-    files = {name: PACKAGE / name for name in MODULE_ORDER}
-    missing = [name for name, path in files.items() if not path.is_file()]
-    if missing:
-        raise SystemExit("missing shim modules: %s" % ", ".join(missing))
-    return files
-
-
 def minify_source(source):
     """Remove comments and blank lines without changing Python token spacing."""
     lines = source.splitlines()
@@ -56,10 +46,14 @@ def minify_source(source):
 
 
 def read_shim():
-    files = package_files()
+    if not PACKAGE.is_dir():
+        raise SystemExit("missing shim package: %s" % PACKAGE)
     parts = []
     for name in MODULE_ORDER:
-        source = files[name].read_text(encoding="utf-8")
+        path = PACKAGE / name
+        if not path.is_file():
+            raise SystemExit("missing shim module: %s" % name)
+        source = path.read_text(encoding="utf-8")
         source = re.sub(r"^from \.\w* import .*\n", "", source, flags=re.MULTILINE)
         parts.append(minify_source(source).rstrip("\n"))
     source = "\n".join(parts) + "\n"
@@ -84,7 +78,8 @@ def build_bytes():
     if not template.startswith("#!/"):
         raise SystemExit("launcher template must start with a shebang")
     output = template.replace(MARKER, read_shim()).replace(VERSION_MARKER, version)
-    output = output.split("\n", 1)[0] + "\n" + header + output.split("\n", 1)[1]
+    shebang, rest = output.split("\n", 1)
+    output = shebang + "\n" + header + rest
     return output.encode("utf-8")
 
 
@@ -93,6 +88,7 @@ def main():
     parser.add_argument("--check", action="store_true", help="fail if the artifact is out of date")
     args = parser.parse_args()
     data = build_bytes()
+    version = read_version()
     if args.check:
         if not OUTPUT.exists() or OUTPUT.read_bytes() != data:
             print("claude-copilot.sh is out of date; run: python3 build.py")
@@ -108,7 +104,7 @@ def main():
     finally:
         if os.path.exists(name):
             os.unlink(name)
-    print("built %s (v%s)" % (OUTPUT, read_version()))
+    print("built %s (v%s)" % (OUTPUT, version))
     return 0
 
 

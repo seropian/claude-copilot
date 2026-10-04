@@ -58,10 +58,10 @@ make check
 Create and publish a versioned release by pushing a tag through the release target:
 
 ```sh
-make release VERSION=0.1.0
+make release VERSION=1.0.0
 ```
 
-This updates `VERSION`, builds the ignored `dist/claude-copilot.sh`, runs tests, commits the source and version only, creates `v0.1.0`, and pushes the commit and tag. GitHub Actions then builds the artifact again, verifies it, and publishes `claude-copilot.sh` plus its SHA-256 checksum as a GitHub Release. Real network tests remain opt-in with `E2E=1 make test`.
+This updates `VERSION`, builds the ignored `dist/claude-copilot.sh`, runs tests, commits the source and version only, creates `v1.0.0`, and pushes the commit and tag. GitHub Actions then builds the artifact again, verifies it, and publishes `claude-copilot.sh` plus its SHA-256 checksum as a GitHub Release. Real network tests remain opt-in with `E2E=1 make test`.
 
 The release workflow is the only publishing step. It never commits `dist/`; rerunning a tag workflow re-uploads the same deterministic assets.
 
@@ -84,7 +84,7 @@ claude -> shim (python, 127.0.0.1:<free port>) -> GitHub Copilot API
 
 One small Python server (bundled into the script) sits between Claude Code and Copilot. Source modules use normal imports; the release launcher carries a deterministic, readable minified Python bundle, so there is no other gateway process.
 
-- Claude Code is pointed at the shim via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (a random per-run key; the shim rejects requests without it, and any `Host` header that isn't localhost, so other local processes and web pages can't spend your Copilot quota). The launcher passes the same values in Claude Code's session settings so background agents can use the local shim too; the inline environment is kept for older clients. Your shell stays clean. The shim only listens on `127.0.0.1`.
+- Claude Code is pointed at the shim via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (a random key kept in the shim state file; the shim rejects requests without it, and any `Host` header that isn't localhost, so other local processes and web pages can't spend your Copilot quota). The launcher passes the same values in Claude Code's session settings so background agents can use the local shim too; the inline environment is kept for older clients. Your shell stays clean. The shim only listens on `127.0.0.1`.
 - **Auth:** GitHub device-code login with the VS Code Copilot client id, then the shim trades the GitHub token for a short-lived Copilot token (`/copilot_internal/v2/token`) and refreshes it before it expires. The API host comes from that token response, so business/enterprise accounts work too.
 - **Routing:** per model, the shim reads `supported_endpoints` from Copilot's `/models` (cached 5 min) and picks:
     - `/v1/messages` (Claude models): forwarded as is, Anthropic format.
@@ -108,9 +108,9 @@ Lifecycle:
 2. Start a background GitHub Releases check for a newer launcher. Network, parsing, checksum, and download errors are ignored and never delay startup.
 3. Start the shim. Bails if its port is taken.
 4. Run `claude`.
-5. Cleanup: kill the shim. On a normal exit, a helper waits for the launcher to stop and atomically replaces it with the verified download. HUP/TERM/INT clean up too.
+5. The shim is left running on purpose, so backgrounded or resumed sessions don't hit "connection refused". Later runs reuse it; if it died, they restart it on the same port with the same key so old sessions reconnect. On a normal exit, a helper waits for the launcher to stop and atomically replaces it with the verified download. HUP/TERM/INT during startup clean up the half-started shim.
 
-Run as many instances in parallel as you like. Each run starts its own shim on a free port picked by the OS, so there's nothing to configure.
+Run as many instances in parallel as you like, they share one shim (state in `~/.local/share/claude-copilot/shim.state`, override with `COPILOT_STATE_DIR`). Stop it with `claude-copilot --stop-shim`.
 
 ## Config
 
@@ -123,7 +123,7 @@ All env vars, all optional.
 | `COPILOT_OPUS_MODEL` | `claude-opus-5.5` | `opus` alias target |
 | `COPILOT_FABLE_MODEL` | `claude-opus-5.5` | `fable` alias target. Copilot has no Fable model, so picking it really gives you whatever this points to |
 | `COPILOT_HAIKU_MODEL` | `claude-haiku-4.5` | `haiku` alias target |
-| `COPILOT_SHIM_PORT` | unset (free port) | pin the shim to a fixed port. Only one run at a time can use it |
+| `COPILOT_SHIM_PORT` | unset (free port) | pin the shim to a fixed port (starts a separate shim if the running one uses another port) |
 | `COPILOT_TOKEN_FILE` | `~/.local/share/claude-copilot/github_token` | where the GitHub token is stored |
 
 Installer vars (only read by `install.sh` / `uninstall.sh`):
@@ -164,10 +164,10 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 
 ## Troubleshooting
 
-- **Port busy:** you set `COPILOT_SHIM_PORT` and something else holds it. Unset it to get a free port.
-- **Leftover shim after `kill -9`:** list them with `pgrep -fl "serve 0 "`, then `kill <pid>` the orphaned one. Don't use `pkill -f` here, it would also kill the shims of any other running instances.
+- **Port busy:** you set `COPILOT_SHIM_PORT` and something other than the shim holds it. Unset it to get a free port.
+- **Stopping the shim:** `claude-copilot --stop-shim`. The next run starts a fresh one.
 - **"GitHub refused the Copilot token request":** the stored login is bad or the account has no Copilot access. Delete `~/.local/share/claude-copilot/github_token` and rerun.
-- **Background agent says it is not logged in:** run `claude-copilot` once from an interactive terminal so the GitHub device login is stored. The launcher reuses that stored login and puts the per-run shim URL/key in the session settings for background agents; it does not ask you to log in again.
+- **Background agent says it is not logged in:** run `claude-copilot` once from an interactive terminal so the GitHub device login is stored. The launcher reuses that stored login and puts the shim URL/key in the session settings for background agents; it does not ask you to log in again.
 - **Shim didn't start:** check `$TMPDIR/claude-copilot.log`.
 - **400 `model_not_supported`:** the model ID doesn't exist on Copilot. `/model` only lists the ones that do.
 - **400 "prefill" on a Claude 5.x model:** the request shape changed. Look at the log.
