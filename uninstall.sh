@@ -22,4 +22,3 @@ elif [ -d "$data" ]; then
   rm -rf "$data" && echo "removed: $data"
 fi
 
-rm -f "${TMPDIR:-/tmp}/claude-copilot.log"

@@ -187,7 +187,8 @@ claude-copilot() {
   fi
   local sport="${COPILOT_SHIM_PORT:-0}"
   local model="${COPILOT_CLAUDE_MODEL:-claude-sonnet-5.5}"
-  local log="${TMPDIR:-/tmp}/claude-copilot.log"
+  local sdir="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}"
+  local log="$sdir/claude-copilot.log"
   local spid="" pf="" i rc ms key
   local -a sa=()
   local script="${BASH_SOURCE[0]:-$0}" wrap=0
@@ -217,13 +218,13 @@ __CLAUDE_COPILOT_SHIM__
   # (backgrounded, resumed, attached later) keep the base URL + key they started with, so the shim must stay up.
   # State file "pid port key version" lets any later run reuse it, or restart it on the same port and key.
   case "$sport" in ''|*[!0-9]*) echo "claude-copilot: COPILOT_SHIM_PORT must be a port number, got '$sport'" >&2; _cc_fail; return ;; esac
+  ( umask 077; mkdir -p "$sdir" ) 2>/dev/null
+  chmod 700 "$sdir" 2>/dev/null
   if [ -L "$log" ]; then
     echo "claude-copilot: refusing to write to $log, it is a symlink" >&2; _cc_fail; return
   fi
-  local sdir="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}" sf opid="" oport="" okey="" over="" want="$sport" healthy=0
+  local sf opid="" oport="" okey="" over="" want="$sport" healthy=0
   sf="$sdir/shim.state"
-  ( umask 077; mkdir -p "$sdir" ) 2>/dev/null
-  chmod 700 "$sdir" 2>/dev/null
   _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for $sdir/shim.lock" >&2; _cc_fail; return; }
   [ -f "$sf" ] && [ ! -L "$sf" ] && read -r opid oport okey over < "$sf" 2>/dev/null
   case "$oport" in ''|*[!0-9]*) oport=""; okey="" ;; esac
@@ -232,8 +233,9 @@ __CLAUDE_COPILOT_SHIM__
     sport="$oport"; key="$okey"
   else
     key=""
-    if [ "$healthy" = 1 ] && [ "$over" != "$_cc_version" ] && [ "$want" = 0 ]; then
+    if [ "$healthy" = 1 ] && [ "$over" != "$_cc_version" ] && { [ "$want" = 0 ] || [ "$want" = "$oport" ]; }; then
       # stale version: restart it on the same port and key so running sessions reconnect
+      key="$okey"
       case "$opid" in ''|*[!0-9]*) ;; *) kill "$opid" 2>/dev/null ;; esac
       for i in $(seq 1 30); do _cc_port_busy "$oport" || break; sleep 0.1; done
     fi
