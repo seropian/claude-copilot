@@ -105,7 +105,7 @@ One small Python server (bundled into the script) sits between Claude Code and C
 Lifecycle:
 
 1. Log in if there's no stored token.
-2. Start a background GitHub Releases check for a newer launcher. Network, parsing, checksum, and download errors are ignored and never delay startup.
+2. Start a background GitHub Releases check for a newer launcher (skipped when `COPILOT_NO_UPDATE` is set). Network, parsing, checksum, and download errors are ignored and never delay startup. The script and its SHA-256 come from the same release over HTTPS, so the checksum only catches a corrupted download; it doesn't protect against a compromised release. If that matters to you, set `COPILOT_NO_UPDATE` and update by hand.
 3. Start the shim. Bails if its port is taken.
 4. Run `claude`.
 5. The shim is left running on purpose, so backgrounded or resumed sessions don't hit "connection refused". Later runs reuse it; if it died, they restart it on the same port with the same key so old sessions reconnect. On a normal exit, a helper waits for the launcher to stop and atomically replaces it with the verified download. HUP/TERM/INT during startup clean up the half-started shim.
@@ -123,6 +123,7 @@ All env vars, all optional.
 | `COPILOT_OPUS_MODEL` | `claude-opus-5.5` | `opus` alias target |
 | `COPILOT_FABLE_MODEL` | `claude-opus-5.5` | `fable` alias target. Copilot has no Fable model, so picking it really gives you whatever this points to |
 | `COPILOT_HAIKU_MODEL` | `claude-haiku-4.5` | `haiku` alias target |
+| `COPILOT_NO_UPDATE` | unset | set to any value to turn off the background update check and the exit-time self-update |
 | `COPILOT_SHIM_PORT` | unset (free port) | pin the shim to a fixed port (starts a separate shim if the running one uses another port) |
 | `COPILOT_TOKEN_FILE` | `~/.local/share/claude-copilot/github_token` | where the GitHub token is stored |
 

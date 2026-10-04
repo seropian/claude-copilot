@@ -116,6 +116,12 @@ uc_staged 1.1.0 1.1.0; [ $? -ne 0 ]; check "update check ignores the same versio
 uc_staged 1.2.0 1.1.0; [ $? -ne 0 ]; check "update check ignores an older release" $?
 uc_staged 1.9.0 1.10.0; check "update check compares numerically (1.10.0 > 1.9.0)" $?
 rm -f "$UC"/.claude-copilot-update.*
+uc_state() { # extra env assignment
+  env -i HOME="$UC" PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST= "$@" /bin/bash -c ". '$SCRIPT'; _cc_update_enabled=1; _cc_start_update_check '$UC/app'; wait; printf '[%s]' \"\${_cc_update_state:-}\""
+}
+[ "$(uc_state COPILOT_NO_UPDATE=1)" = "[]" ]; check "COPILOT_NO_UPDATE disables the update check" $?
+case "$(uc_state X=1)" in "[]") false ;; *) true ;; esac; check "update check runs without COPILOT_NO_UPDATE" $?
+rm -f "$UC"/.claude-copilot-update-state.*
 
 # ---------- sourcing vs executing ----------
 
@@ -272,6 +278,7 @@ env -i HOME="$FLOW" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_
 contains "$(cat "$FLOW/stderr")" "shim didn't start"; check "startup failure is reported" $?
 [ ! -e "$FLOW/claude.out" ]; check "claude is not started when the shim dies" $?
 [ -z "$(ls "$FLOW/tmp" | grep -v claude-copilot.log)" ]; check "startup failure leaves no temp files" $?
+[ -z "$(ls "$FLOW/st-die" | grep '^start\.')" ]; check "startup failure leaves nothing in the state dir" $?
 
 # signal during startup: shim is killed, files removed, right exit code
 for sig in TERM INT HUP; do
@@ -279,7 +286,7 @@ for sig in TERM INT HUP; do
   env -i HOME="$FLOW" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" COPILOT_STATE_DIR="$FLOW/st-hang-$sig" FAKE_SERVE=hang \
     perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV' /bin/bash "$SCRIPT" 2>/dev/null & lp=$!
   spid=""
-  for _ in $(seq 1 50); do spid=$(cat "$FLOW"/tmp/claude-copilot.*.pid 2>/dev/null); [ -n "$spid" ] && break; sleep 0.1; done
+  for _ in $(seq 1 50); do spid=$(cat "$FLOW/st-hang-$sig"/start.*.pid 2>/dev/null); [ -n "$spid" ] && break; sleep 0.1; done
   kill -$sig $lp; wait $lp 2>/dev/null; rc=$?
   [ "$rc" -eq "$want" ]; check "SIG$sig during startup returns $want" $? "rc=$rc"
   sleep 0.2
