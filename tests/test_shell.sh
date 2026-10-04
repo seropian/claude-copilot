@@ -229,6 +229,17 @@ check "busy COPILOT_SHIM_PORT fails" $((rc == 1 ? 0 : 1))
 contains "$(cat "$FLOW/stderr")" "busy"; check "busy port explains itself" $?
 [ ! -e "$FLOW/claude.out" ]; check "claude is not started when port is busy" $?
 
+# update notice: silent on first run and same version, says so once when the version changed
+run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+! contains "$(cat "$FLOW/stderr")" "updated"; check "no update notice on first run" $?
+run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+! contains "$(cat "$FLOW/stderr")" "updated"; check "no update notice on same version" $?
+echo 0.0.1 > "$FLOW/st-ver/last-version"
+run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+contains "$(cat "$FLOW/stderr")" "updated 0.0.1 -> "; check "update notice when the version changed" $?
+run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+! contains "$(cat "$FLOW/stderr")" "updated"; check "update notice shows only once" $?
+
 # login failure stops the launcher
 rm -f "$FLOW/claude.out"
 env -i HOME="$FLOW/emptyhome" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/nothing/token" \
