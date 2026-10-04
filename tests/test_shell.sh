@@ -119,8 +119,8 @@ rm -f "$UC"/.claude-copilot-update.*
 uc_state() { # extra env assignment
   env -i HOME="$UC" PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST= "$@" /bin/bash -c ". '$SCRIPT'; _cc_update_enabled=1; _cc_start_update_check '$UC/app'; wait; printf '[%s]' \"\${_cc_update_state:-}\""
 }
-[ "$(uc_state COPILOT_NO_UPDATE=1)" = "[]" ]; check "COPILOT_NO_UPDATE disables the update check" $?
-case "$(uc_state X=1)" in "[]") false ;; *) true ;; esac; check "update check runs without COPILOT_NO_UPDATE" $?
+[ "$(uc_state X=1)" = "[]" ]; check "update check is off by default" $?
+case "$(uc_state COPILOT_AUTO_UPDATE=1)" in "[]") false ;; *) true ;; esac; check "COPILOT_AUTO_UPDATE turns the update check on" $?
 rm -f "$UC"/.claude-copilot-update-state.*
 
 # ---------- sourcing vs executing ----------
@@ -387,6 +387,18 @@ wait
 # stale lock from a dead pid is cleared
 mkdir "$CW/home/.local/share/claude-copilot/shim.lock"; echo 999999 > "$CW/home/.local/share/claude-copilot/shim.lock/pid"
 cw_run /bin/bash "$SCRIPT" >/dev/null 2>&1; check "stale shim lock is cleared" $?
+
+# a stale break lock (breaker died) is cleared too
+mkdir "$CW/home/.local/share/claude-copilot/shim.lock" "$CW/home/.local/share/claude-copilot/shim.lock.break"
+echo 999999 > "$CW/home/.local/share/claude-copilot/shim.lock/pid"; echo 999999 > "$CW/home/.local/share/claude-copilot/shim.lock.break/pid"
+cw_run /bin/bash "$SCRIPT" >/dev/null 2>&1; check "stale break lock is cleared" $?
+[ ! -e "$CW/home/.local/share/claude-copilot/shim.lock.break" ]; check "break lock released" $?
+
+# a live owner's lock is never broken
+LK="$TMP/lk"; mkdir -p "$LK/shim.lock"; sleep 30 & lp=$!; echo $lp > "$LK/shim.lock/pid"
+/bin/bash -c ". '$SCRIPT'; _cc_lock_break '$LK/shim.lock'"
+[ -d "$LK/shim.lock" ]; check "live lock owner keeps its lock" $?
+kill $lp 2>/dev/null; wait $lp 2>/dev/null
 
 awk '{print $2, $3}' "$CW/claude.log" | sort -u | grep -qx "$SCRIPT 1"; check "claude gets CLAUDE_CODE_PROCESS_WRAPPER=<launcher>" $? "$(cat "$CW/claude.log")"
 
