@@ -84,7 +84,7 @@ claude -> shim (python, 127.0.0.1:<free port>) -> GitHub Copilot API
 
 One small Python server (bundled into the script) sits between Claude Code and Copilot. Source modules use normal imports; the release launcher carries a deterministic, readable minified Python bundle, so there is no other gateway process.
 
-- Claude Code is pointed at the shim via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (a random key kept in the shim state file; the shim rejects requests without it, and any `Host` header that isn't localhost, so other local processes and web pages can't spend your Copilot quota). The launcher passes the same values in Claude Code's session settings so background agents can use the local shim too; the inline environment is kept for older clients. Your shell stays clean. The shim only listens on `127.0.0.1`.
+- Claude Code is pointed at the shim via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (a random key kept in the shim state file; the shim rejects requests without it, and any `Host` header that isn't localhost, so other local processes and web pages can't spend your Copilot quota). The launcher passes the same values in a mode-600 settings file (`settings-<hash>.json` in the state dir, so the key never shows up in `ps`) so background agents can use the local shim too; the inline environment is kept for older clients. Your shell stays clean. The shim only listens on `127.0.0.1`.
 - **Auth:** GitHub device-code login with the VS Code Copilot client id, then the shim trades the GitHub token for a short-lived Copilot token (`/copilot_internal/v2/token`) and refreshes it before it expires. The API host comes from that token response, so business/enterprise accounts work too.
 - **Routing:** per model, the shim reads `supported_endpoints` from Copilot's `/models` (cached 5 min) and picks:
     - `/v1/messages` (Claude models): forwarded as is, Anthropic format.
@@ -125,6 +125,7 @@ All env vars, all optional.
 | `COPILOT_HAIKU_MODEL` | `claude-haiku-4.5` | `haiku` alias target |
 | `COPILOT_NO_UPDATE` | unset | set to any value to turn off the background update check and the exit-time self-update |
 | `COPILOT_SHIM_PORT` | unset (free port) | pin the shim to a fixed port (starts a separate shim if the running one uses another port) |
+| `COPILOT_STATE_DIR` | `~/.local/share/claude-copilot` | where the shim state file, lock and settings files live |
 | `COPILOT_TOKEN_FILE` | `~/.local/share/claude-copilot/github_token` | where the GitHub token is stored |
 
 Installer vars (only read by `install.sh` / `uninstall.sh`):
@@ -157,7 +158,9 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 - **Unofficial:** this uses GitHub's private Copilot endpoints, with the VS Code Copilot client id and headers. It may break when GitHub changes things, and may be against GitHub's terms. Your call.
 - **Billing:** premium requests count against your Copilot plan.
 - **Rate limits:** Copilot rate-limits per account and model tier (the small "utility" models like gpt-4o-mini hit it first). On a 429 Claude Code retries until it gives up, so it looks like a hang. Look for `429` in `$TMPDIR/claude-copilot.log`, wait it out.
-- **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude. Thinking blocks and prompt-cache controls are not translated.
+- **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude. Thinking blocks and prompt-cache controls are not translated. Images inside tool results (e.g. reading a screenshot) are replaced by `[image omitted]`; only images in user messages get through. Upstream errors keep their status but are all typed `api_error`, and `Retry-After` isn't forwarded, so Claude Code's "prompt too long" handling may not kick in. Tool-call arguments that aren't valid JSON (e.g. cut off by the token limit) become `{}`.
+- **Premium-request accounting:** requests that already have an assistant turn are sent with `x-initiator: agent`, same as the VS Code client does for tool follow-ups. Whether Copilot bills those differently is up to GitHub.
+- **Pinned client identity:** the VS Code / Copilot Chat versions sent in headers are hardcoded. If GitHub starts rejecting them, the shim needs a new release.
 - **`auto` model:** Copilot's auto-routing is done client-side by Copilot's own apps, the API doesn't expose it. Use Copilot CLI for that.
 - **Catalog warning:** Claude Code warns the model isn't in its catalog and assumes a 200k context. The script sets `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` to relax that.
 - **Auto mode:** works, but the safety checks run as Claude Code's own requests through Copilot (they count against your plan), not on Anthropic's server. The script sets `CLAUDE_CODE_AUTO_MODE_SERVER=0` because Copilot rejects the `safeguards` field the server-side checks need, and this also stops the "session isn't eligible" notice. The classifier's `thinking: disabled` is handled by the shim, see "Request rewrites".
@@ -169,6 +172,7 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 - **Stopping the shim:** `claude-copilot --stop-shim`. The next run starts a fresh one.
 - **"GitHub refused the Copilot token request":** the stored login is bad or the account has no Copilot access. Delete `~/.local/share/claude-copilot/github_token` and rerun.
 - **Background agent says it is not logged in:** run `claude-copilot` once from an interactive terminal so the GitHub device login is stored. The launcher reuses that stored login and puts the shim URL/key in the session settings for background agents; it does not ask you to log in again.
+- **503 "model list unavailable":** the shim couldn't fetch Copilot's `/models`. It retries after about 30s.
 - **Shim didn't start:** check `$TMPDIR/claude-copilot.log`.
 - **400 `model_not_supported`:** the model ID doesn't exist on Copilot. `/model` only lists the ones that do.
 - **400 "prefill" on a Claude 5.x model:** the request shape changed. Look at the log.

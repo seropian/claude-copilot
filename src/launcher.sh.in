@@ -267,19 +267,21 @@ __CLAUDE_COPILOT_SHIM__
   [ "$wrap" = 1 ] && ms=""
   case "$ms" in
     "{"*)
-      ms=$(CC_SETTINGS_BASE="http://127.0.0.1:$sport" CC_SETTINGS_KEY="$key" \
+      ms=$(CC_SETTINGS_DIR="$sdir" CC_SETTINGS_BASE="http://127.0.0.1:$sport" CC_SETTINGS_KEY="$key" \
         CC_SETTINGS_MODEL="$model" \
         CC_SETTINGS_SONNET="${COPILOT_SONNET_MODEL:-claude-sonnet-5.5}" \
         CC_SETTINGS_OPUS="${COPILOT_OPUS_MODEL:-claude-opus-5.5}" \
         CC_SETTINGS_FABLE="${COPILOT_FABLE_MODEL:-claude-opus-5.5}" \
         CC_SETTINGS_HAIKU="${COPILOT_HAIKU_MODEL:-claude-haiku-4.5}" \
-        python3 -c 'import json, os, sys; s=json.load(sys.stdin); s.setdefault("env", {}).update({
+        python3 -c 'import hashlib, json, os, sys; s=json.load(sys.stdin); s.setdefault("env", {}).update({
           "ANTHROPIC_BASE_URL": os.environ["CC_SETTINGS_BASE"], "ANTHROPIC_AUTH_TOKEN": os.environ["CC_SETTINGS_KEY"],
           "ANTHROPIC_MODEL": os.environ["CC_SETTINGS_MODEL"],
           "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ["CC_SETTINGS_SONNET"], "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ["CC_SETTINGS_OPUS"],
           "ANTHROPIC_DEFAULT_FABLE_MODEL": os.environ["CC_SETTINGS_FABLE"], "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ["CC_SETTINGS_HAIKU"],
           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
-          "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1"}); print(json.dumps(s, separators=(",", ":")))' <<<"$ms") || ms=""
+          "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1"}); d=json.dumps(s, separators=(",", ":"))
+p=os.path.join(os.environ["CC_SETTINGS_DIR"], "settings-" + hashlib.sha256(d.encode()).hexdigest()[:16] + ".json")
+fd=os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, d.encode()); os.close(fd); os.replace(p + ".tmp", p); print(p)' <<<"$ms") || ms=""
       [ -n "$ms" ] && sa=(--settings "$ms")
       ;;
   esac

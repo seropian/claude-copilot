@@ -685,7 +685,7 @@ class Server(Base):
         self.assertEqual(json.loads(data)["content"][0]["text"], "yo")
 
     def test_unknown_model_falls_back_to_chat(self):
-        self.models()
+        self.models(model_entry("other", ["/responses"]))
         self.up.json("/chat/completions", {"choices": [{"message": {"content": "k"}, "finish_reason": "stop"}]})
         s, data, _ = self.post({"model": "mystery", "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(s, 200)
@@ -698,8 +698,14 @@ class Server(Base):
         self.assertEqual(s, 403)
         self.assertIn("quota", json.loads(data)["error"]["message"])
 
+    def test_empty_model_list_is_503(self):
+        self.models()
+        s, data, _ = self.post({"model": "claude-x", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(s, 503)
+        self.assertEqual(self.up.seen[-1]["path"], "/models")
+
     def test_upstream_unreachable_is_502(self):
-        self.models(model_entry("gpt", ["/responses"]))
+        shim.MODELS.update(at=time.time(), data=[model_entry("gpt", ["/responses"])])
         shim.CT["api"] = "http://127.0.0.1:1"
         s, data, _ = self.post({"model": "gpt", "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(s, 502)
