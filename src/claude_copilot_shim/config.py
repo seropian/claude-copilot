@@ -2,7 +2,8 @@ import os, sys, time
 
 GH, GHAPI = "https://github.com", "https://api.github.com"
 CLIENT_ID = "Iv1.b507a08c87ecfe98"
-VSC, PLUG = "1.104.3", "0.26.7"
+VSC = os.environ.get("COPILOT_EDITOR_VERSION") or "1.104.3"
+PLUG = os.environ.get("COPILOT_PLUGIN_VERSION") or "0.26.7"
 BASE_H = {"editor-version": "vscode/" + VSC, "editor-plugin-version": "copilot-chat/" + PLUG,
           "user-agent": "GitHubCopilotChat/" + PLUG, "x-github-api-version": "2025-04-01"}
 TOKEN_FILE = os.path.expanduser(os.environ.get("COPILOT_TOKEN_FILE") or "~/.local/share/claude-copilot/github_token")

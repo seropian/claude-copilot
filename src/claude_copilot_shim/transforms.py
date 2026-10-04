@@ -1,13 +1,15 @@
 import json, uuid
-from .helpers import blocks, data_url, mk_usage, result_text, tool_choice, tool_defs, txt
+from .config import log
+from .helpers import blocks, data_url, mk_usage, result_images, result_text, tool_choice, tool_defs, txt
 from .models import picker_models
 
+IMG_NOTE = "Images returned by the tool call(s) above:"
 def add_msg(items, role, parts):
     if parts: items.append({"type": "message", "role": role, "content": parts[:]}); del parts[:]
 def to_responses(j):
     items = []
     for m in j["messages"]:
-        role, parts = m["role"], []
+        role, parts, imgs = m["role"], [], []
         for b in blocks(m["content"]):
             t = b.get("type")
             if t == "text":
@@ -20,7 +22,11 @@ def to_responses(j):
             elif t == "tool_result":
                 add_msg(items, role, parts)
                 items.append({"type": "function_call_output", "call_id": b["tool_use_id"], "output": result_text(b)})
+                imgs += result_images(b)
         add_msg(items, role, parts)
+        if imgs:
+            items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": IMG_NOTE}] +
+                          [{"type": "input_image", "image_url": data_url(s)} for s in imgs]})
     body = {"model": j["model"], "input": items, "stream": bool(j.get("stream")), "store": False}
     if txt(j.get("system")): body["instructions"] = txt(j["system"])
     if j.get("max_tokens"): body["max_output_tokens"] = j["max_tokens"]
@@ -34,8 +40,8 @@ def usage(r):
     u = r.get("usage") or {}
     return mk_usage(u.get("input_tokens", 0), u.get("output_tokens", 0), (u.get("input_tokens_details") or {}).get("cached_tokens", 0))
 def stop_reason(r, tool):
-    if tool: return "tool_use"
-    return "max_tokens" if (r.get("incomplete_details") or {}).get("reason") == "max_output_tokens" else "end_turn"
+    if (r.get("incomplete_details") or {}).get("reason") == "max_output_tokens": return "max_tokens"
+    return "tool_use" if tool else "end_turn"
 def from_responses(r, model):
     content = []
     for o in r.get("output", []):
@@ -58,8 +64,14 @@ def to_chat(j):
             if calls: msg["tool_calls"] = calls
             msgs.append(msg)
             continue
+        imgs = []
         for b in bl:
-            if b.get("type") == "tool_result": msgs.append({"role": "tool", "tool_call_id": b["tool_use_id"], "content": result_text(b)})
+            if b.get("type") == "tool_result":
+                msgs.append({"role": "tool", "tool_call_id": b["tool_use_id"], "content": result_text(b)})
+                imgs += result_images(b)
+        if imgs:
+            msgs.append({"role": "user", "content": [{"type": "text", "text": IMG_NOTE}] +
+                         [{"type": "image_url", "image_url": {"url": data_url(s)}} for s in imgs]})
         rest = [b for b in bl if b.get("type") in ("text", "image")]
         if any(b["type"] == "image" for b in rest):
             parts = [{"type": "text", "text": b["text"]} if b["type"] == "text" else
@@ -85,14 +97,17 @@ def chat_usage(u):
 CHAT_STOP = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use", "content_filter": "end_turn"}
 def parse_args(s):
     try: return json.loads(s or "{}")
-    except ValueError: return {}
+    except ValueError:
+        log("shim: tool call arguments are not valid JSON (truncated?), passing {}")
+        return {}
 def from_chat(r, model):
     ch = (r.get("choices") or [{}])[0]
     msg = ch.get("message") or {}
     content = [{"type": "text", "text": msg["content"]}] if msg.get("content") else []
     for c in msg.get("tool_calls") or []:
         content.append({"type": "tool_use", "id": c["id"], "name": c["function"]["name"], "input": parse_args(c["function"].get("arguments"))})
-    stop = "tool_use" if any(b["type"] == "tool_use" for b in content) else CHAT_STOP.get(ch.get("finish_reason"), "end_turn")
+    stop = CHAT_STOP.get(ch.get("finish_reason"), "end_turn")
+    if stop != "max_tokens" and any(b["type"] == "tool_use" for b in content): stop = "tool_use"
     return {"id": "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant", "model": model, "content": content,
             "stop_reason": stop, "stop_sequence": None, "usage": chat_usage(r.get("usage"))}
 

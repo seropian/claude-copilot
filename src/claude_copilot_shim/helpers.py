@@ -1,3 +1,4 @@
+import json, re
 
 def blocks(c): return [{"type": "text", "text": c}] if isinstance(c, str) else list(c or [])
 def txt(c): return "".join(b.get("text", "") for b in blocks(c) if b.get("type") == "text")
@@ -18,7 +19,20 @@ def fix(j):
             out.append(m)
     j["messages"] = out
     return j
-def err(msg): return {"type": "error", "error": {"type": "api_error", "message": msg}}
+def err(msg, kind="api_error"): return {"type": "error", "error": {"type": kind, "message": msg}}
+ERR_KINDS = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error", 404: "not_found_error",
+             413: "request_too_large", 429: "rate_limit_error", 529: "overloaded_error"}
+CTX_RE = re.compile(r"context.length|context window|too many tokens|token limit|maximum context|prompt is too long", re.I)
+def upstream_err(code, body):
+    """Anthropic-style error for a non-Anthropic upstream failure. Context-length errors get the prefix Claude Code looks for."""
+    text = body
+    try:
+        e = json.loads(body).get("error")
+        text = (e.get("message") if isinstance(e, dict) else e) or body
+    except (ValueError, AttributeError): pass
+    if not isinstance(text, str): text = body
+    if code == 400 and CTX_RE.search(text) and not text.lower().startswith("prompt is too long"): text = "prompt is too long: " + text
+    return err(text, ERR_KINDS.get(code, "api_error"))
 def drop_path(j, path):
     """Delete the field a Copilot "a.0.b.c: Extra inputs..." path points at. Copilot inserts type names
     into the path (tools.0.custom.x, cache_control.ephemeral.x), so a segment that is not a container is skipped."""
@@ -45,8 +59,13 @@ def adapt_thinking(j):
     new = THINK.get((j.get("model"), j["thinking"].get("type")), False)
     if new is None: j.pop("thinking", None)
     elif new: j["thinking"] = new
+def result_images(b):
+    return [x["source"] for x in blocks(b.get("content")) if x.get("type") == "image" and (x.get("source") or {}).get("type") == "base64"]
 def result_text(b):
-    parts = [x.get("text", "") if x.get("type") == "text" else "[image omitted]" for x in blocks(b.get("content")) if x.get("type") in ("text", "image")]
+    def part(x):
+        if x.get("type") == "text": return x.get("text", "")
+        return "[image attached in the next message]" if (x.get("source") or {}).get("type") == "base64" else "[image omitted]"
+    parts = [part(x) for x in blocks(b.get("content")) if x.get("type") in ("text", "image")]
     return ("Error: " if b.get("is_error") else "") + "".join(parts)
 def tool_choice(j, flat):
     tc = j.get("tool_choice") or {}
