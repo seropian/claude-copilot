@@ -85,6 +85,17 @@ _cc_fail() {
   return 1
 }
 
+# arg: file holding the last version that ran. Says so once when the version changed since then.
+_cc_announce_update() {
+  local f="$1" old=""
+  [ -L "$f" ] && return 0
+  [ -f "$f" ] && read -r old < "$f" 2>/dev/null
+  [ "$old" = "$_cc_version" ] && return 0
+  [ -n "$old" ] && echo "claude-copilot: updated $old -> $_cc_version" >&2
+  ( umask 077; printf '%s\n' "$_cc_version" > "$f.tmp" && mv -f "$f.tmp" "$f" ) 2>/dev/null
+  return 0
+}
+
 _cc_check_update() {
   local script="$1" state="$2" dir latest tmp expected actual
   [ -f "$script" ] && [ ! -L "$script" ] || return 0
@@ -124,7 +135,7 @@ sys.exit(0 if v(sys.argv[1]) > v(sys.argv[2]) else 1)' "$latest" "$_cc_version" 
 _cc_start_update_check() {
   local script="$1" dir state
   [ "${_cc_update_enabled:-0}" = 1 ] || return 0
-  [ -n "${COPILOT_AUTO_UPDATE:-}" ] || return 0
+  [ "${COPILOT_AUTO_UPDATE:-}" != 0 ] || return 0
   dir="${script%/*}"
   [ "$dir" = "$script" ] && dir="."
   [ -w "$dir" ] || return 0
@@ -231,6 +242,7 @@ __CLAUDE_COPILOT_SHIM__
   fi
   local sf opid="" oport="" okey="" over="" want="$sport" healthy=0
   sf="$sdir/shim.state"
+  [ "$wrap" = 1 ] || _cc_announce_update "$sdir/last-version"
   _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for $sdir/shim.lock (if no other claude-copilot is starting, rm -rf it)" >&2; _cc_fail; return; }
   [ -f "$sf" ] && [ ! -L "$sf" ] && read -r opid oport okey over < "$sf" 2>/dev/null
   case "$oport" in ''|*[!0-9]*) oport=""; okey="" ;; esac

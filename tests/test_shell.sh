@@ -121,8 +121,8 @@ rm -f "$UC/state"; PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST=1.1.0 /bin/bash -c "
 uc_state() { # extra env assignment
   env -i HOME="$UC" PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST= "$@" /bin/bash -c ". '$SCRIPT'; _cc_update_enabled=1; _cc_start_update_check '$UC/app'; wait; printf '[%s]' \"\${_cc_update_state:-}\""
 }
-[ "$(uc_state X=1)" = "[]" ]; check "update check is off by default" $?
-case "$(uc_state COPILOT_AUTO_UPDATE=1)" in "[]") false ;; *) true ;; esac; check "COPILOT_AUTO_UPDATE turns the update check on" $?
+case "$(uc_state X=1)" in "[]") false ;; *) true ;; esac; check "update check is on by default" $?
+[ "$(uc_state COPILOT_AUTO_UPDATE=0)" = "[]" ]; check "COPILOT_AUTO_UPDATE=0 turns the update check off" $?
 rm -f "$UC"/.claude-copilot-update-state.*
 
 # ---------- sourcing vs executing ----------
@@ -230,6 +230,17 @@ kill $holder 2>/dev/null; wait $holder 2>/dev/null
 check "busy COPILOT_SHIM_PORT fails" $((rc == 1 ? 0 : 1))
 contains "$(cat "$FLOW/stderr")" "busy"; check "busy port explains itself" $?
 [ ! -e "$FLOW/claude.out" ]; check "claude is not started when port is busy" $?
+
+# update notice: silent on first run and same version, says so once when the version changed
+run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+! contains "$(cat "$FLOW/stderr")" "updated"; check "no update notice on first run" $?
+run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+! contains "$(cat "$FLOW/stderr")" "updated"; check "no update notice on same version" $?
+echo 0.0.1 > "$FLOW/st-ver/last-version"
+run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+contains "$(cat "$FLOW/stderr")" "updated 0.0.1 -> "; check "update notice when the version changed" $?
+run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+! contains "$(cat "$FLOW/stderr")" "updated"; check "update notice shows only once" $?
 
 # login failure stops the launcher
 rm -f "$FLOW/claude.out"

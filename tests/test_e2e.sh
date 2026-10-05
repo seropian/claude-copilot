@@ -24,7 +24,7 @@ fi
 
 NATIVE="${E2E_NATIVE:-claude-haiku-4.5}"
 RESPONSES="${E2E_RESPONSES:-gpt-5-mini}"
-CHAT="${E2E_CHAT:-gemini-2.5-pro}"
+CHAT="${E2E_CHAT:-gemini-3.7-flash}"
 
 # Run the launcher with a timeout (perl is on every mac/linux box, `timeout` is not).
 # args: seconds, then launcher args. Output in $OUT, exit code in $RC.
