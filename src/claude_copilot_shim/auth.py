@@ -12,6 +12,10 @@ def _sync_legacy_config():
         AUTH.config.logger = log
 
 
+class TransientAuthError(RuntimeError):
+    pass
+
+
 class GithubAuth:
     def __init__(self, config=None, opener=None):
         self.config = config or Config()
@@ -69,10 +73,10 @@ class GithubAuth:
             except urllib.error.HTTPError as e:
                 if e.code in (401, 403):
                     raise RuntimeError("GitHub refused the Copilot token request (%s). Delete %s and rerun to log in again." % (e.code, self.config.token_file))
-                raise RuntimeError("GitHub token request failed (%s), try again in a moment." % e.code)
-            except Exception as e: raise RuntimeError("GitHub token request failed (%r), try again in a moment." % e)
+                raise TransientAuthError("GitHub token request failed (%s), try again in a moment." % e.code)
+            except Exception as e: raise TransientAuthError("GitHub token request failed (%r), try again in a moment." % e)
             try: self.token.update(tok=r["token"], exp=r["expires_at"], api=(r.get("endpoints") or {}).get("api") or self.token["api"])
-            except (KeyError, TypeError): raise RuntimeError("GitHub returned an unexpected Copilot token response.")
+            except (KeyError, TypeError): raise TransientAuthError("GitHub returned an unexpected Copilot token response.")
             return self.token["tok"]
 
 
