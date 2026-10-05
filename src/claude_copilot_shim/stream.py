@@ -19,7 +19,8 @@ def count_tokens(j, raw_len, extra):
     try:
         if "/v1/messages" in endpoints(j.get("model")):
             r = cp_open("/v1/messages/count_tokens", j, False, has_image(j), False, extra)
-            n = json.load(r).get("input_tokens")
+            try: n = json.load(r).get("input_tokens")
+            finally: r.close()
             if isinstance(n, int): return {"input_tokens": n}
     except Exception as e:
         log("shim: count_tokens fell back to estimate (%r)" % e)

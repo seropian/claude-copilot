@@ -1,4 +1,4 @@
-import json, time, urllib.request
+import json, threading, time, urllib.request
 from .config import Config
 from .auth import CLIENT
 
@@ -13,8 +13,13 @@ class ModelCatalog:
         self.clock = clock or client.auth.config.clock
         self.logger = logger or client.auth.config.logger
         self.cache = {"at": 0, "data": []}
+        self.lock = threading.Lock()
 
     def models(self):
+        with self.lock:
+            return self._models()
+
+    def _models(self):
         if self.clock() - self.cache["at"] > 300:
             self.cache["at"] = self.clock()
             try:

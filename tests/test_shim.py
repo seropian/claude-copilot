@@ -737,6 +737,34 @@ class Server(Base):
         a0 = "".join(e["delta"]["partial_json"] for e in ev if e["type"] == "content_block_delta" and e["index"] == 0)
         self.assertEqual(a0, '{"a":1}')
 
+    def test_stream_chat_repeated_tool_id_does_not_reopen(self):
+        self.models(model_entry("c", ["/chat/completions"]))
+        tc = lambda **f: {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "i0", "function": f}]}}]}
+        self.up.sse("/chat/completions", [tc(name="f", arguments="{"), tc(name="f", arguments="}"),
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}, {"type": "[DONE]"}])
+        _, data, _ = self.post({"model": "c", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        ev = self.events(data)
+        self.assertEqual(len([e for e in ev if e["type"] == "content_block_start"]), 1)
+        self.assertEqual("".join(e["delta"]["partial_json"] for e in ev if e["type"] == "content_block_delta"), "{}")
+
+    def test_stream_chat_text_after_tool_closes_tool_first(self):
+        self.models(model_entry("c", ["/chat/completions"]))
+        self.up.sse("/chat/completions", [
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "i0", "function": {"name": "f", "arguments": "{}"}}]}}]},
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}, {"type": "[DONE]"}])
+        _, data, _ = self.post({"model": "c", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        seq = [(e["type"], e.get("index")) for e in self.events(data) if e["type"].startswith("content_block_st")]
+        self.assertEqual(seq, [("content_block_start", 0), ("content_block_stop", 0), ("content_block_start", 1), ("content_block_stop", 1)])
+
+    def test_transient_token_failure_is_503_not_401(self):
+        from claude_copilot_shim.auth import TransientAuthError
+        orig = shim.AUTH.copilot_token
+        self.addCleanup(setattr, shim.AUTH, "copilot_token", orig)
+        shim.AUTH.copilot_token = lambda: (_ for _ in ()).throw(TransientAuthError("GitHub down"))
+        s, _, h = self.post({"model": "claude-x", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual((s, h.headers.get("retry-after")), (503, "5"))
+
     def test_stream_responses_args_for_unopened_index_ignored(self):
         self.models(model_entry("gpt", ["/responses"]))
         self.up.sse("/responses", [

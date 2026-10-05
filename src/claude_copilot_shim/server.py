@@ -1,6 +1,6 @@
 import hmac, http.server, json, urllib.error, uuid
 from .config import KEY, MAX_BODY, log
-from .auth import cp_open
+from .auth import TransientAuthError, cp_open
 from .helpers import adapt_thinking, drop_path, err, fix, has_image, is_agent, THINK, thinking_fix, upstream_err
 from .models import CatalogUnavailable, endpoints, picker_models
 from .stream import sse_events, count_tokens
@@ -50,11 +50,16 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
         if not done: self.sse("error", **err("upstream stream ended early"))
     def stream_chat(self, r, model):
         self.start_stream(model)
-        idx, cur, tools, pend, stop, use, done = -1, None, {}, {}, None, {}, False
-        def close_text():
+        idx, cur, tools, ids, pend, stop, use, done = -1, None, {}, {}, {}, None, {}, False
+        live = set()
+        def close(only=None):
             nonlocal cur
-            if cur is not None: self.sse("content_block_stop", index=cur); cur = None
-        def args(n, a): self.sse("content_block_delta", index=tools[n], delta={"type": "input_json_delta", "partial_json": a})
+            for i in sorted(live if only is None else live & only):
+                self.sse("content_block_stop", index=i); live.discard(i)
+                if i == cur: cur = None
+        def close_all(): close()
+        def args(n, a):
+            if tools[n] in live: self.sse("content_block_delta", index=tools[n], delta={"type": "input_json_delta", "partial_json": a})
         for e in sse_events(r):
             if e.get("type") == "[DONE]": done = True; break
             if e.get("usage"): use = e["usage"]
@@ -63,21 +68,20 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
             d = ch.get("delta") or {}
             if d.get("content"):
                 if cur is None:
-                    idx += 1; cur = idx
+                    close_all(); idx += 1; cur = idx; live.add(idx)
                     self.sse("content_block_start", index=idx, content_block={"type": "text", "text": ""})
                 self.sse("content_block_delta", index=cur, delta={"type": "text_delta", "text": d["content"]})
             for tc in d.get("tool_calls") or []:
                 n = tc.get("index", 0); f = tc.get("function") or {}
-                if f.get("name") and (n not in tools or tc.get("id")):
-                    close_text(); idx += 1; tools[n] = idx
+                if f.get("name") and (n not in tools or (tc.get("id") and ids.get(n) and tc["id"] != ids[n])):
+                    close({cur, tools.get(n)}); idx += 1; tools[n] = idx; ids[n] = tc.get("id"); live.add(idx)
                     self.sse("content_block_start", index=idx, content_block={"type": "tool_use", "id": tc.get("id") or "call_" + uuid.uuid4().hex[:24], "name": f["name"], "input": {}})
                     if pend.get(n): args(n, pend.pop(n))
                 if f.get("arguments"):
                     if n in tools: args(n, f["arguments"])
                     else: pend[n] = pend.get(n, "") + f["arguments"]
             if ch.get("finish_reason"): stop = ch["finish_reason"]
-        close_text()
-        for i in tools.values(): self.sse("content_block_stop", index=i)
+        close_all()
         if stop is None and not done:
             self.sse("error", **err("upstream stream ended early")); return
         self.sse("message_delta", delta={"stop_reason": "max_tokens" if stop == "length" else "tool_use" if tools else CHAT_STOP.get(stop, "end_turn"), "stop_sequence": None}, usage=chat_usage(use))
@@ -87,7 +91,7 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             r = cp_open(path, body, stream, has_image(j), is_agent(j))
         except urllib.error.HTTPError as e:
-            msg = e.read().decode(errors="replace"); log("shim: %s %s: %s" % (path, e.code, msg[:300]))
+            msg = e.read().decode(errors="replace"); e.close(); log("shim: %s %s: %s" % (path, e.code, msg[:300]))
             ra = e.headers.get("retry-after") if e.headers else None
             return self.reply(e.code, upstream_err(e.code, msg), {"retry-after": ra} if ra else None)
         except RuntimeError:
@@ -115,7 +119,7 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
                 r = cp_open("/v1/messages", j, bool(j.get("stream")), has_image(j), is_agent(j), extra)
                 break
             except urllib.error.HTTPError as e:
-                data = e.read()
+                data = e.read(); e.close()
                 try: obj = json.loads(data); m = obj["error"]["message"]
                 except Exception: obj, m = err(data.decode(errors="replace")), ""
                 key = m.split(":")[0]
@@ -177,6 +181,8 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
             if "/v1/messages" in eps: return self.native(j)
             if "/responses" in eps: return self.via(j, "/responses", to_responses(j), from_responses, self.stream_responses)
             return self.via(j, "/chat/completions", to_chat(j), from_chat, self.stream_chat)
+        except TransientAuthError as e:
+            log("shim: %s" % e); self.reply(503, err(str(e)), {"retry-after": "5"})
         except RuntimeError as e:
             log("shim: %s" % e); self.reply(401, err(str(e)))
         except CatalogUnavailable as e:
@@ -193,6 +199,8 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
             if path == "/v1/models":
                 data = picker_models()
                 return self.reply(200, {"data": data, "has_more": False, "first_id": data[0]["id"] if data else None, "last_id": data[-1]["id"] if data else None})
+        except (TransientAuthError, CatalogUnavailable) as e:
+            return self.reply(503, err(str(e)), {"retry-after": "5"})
         except RuntimeError as e:
             return self.reply(401, err(str(e)))
         except Exception as e:
