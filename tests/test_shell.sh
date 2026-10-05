@@ -108,7 +108,7 @@ ln -sf "$PY" "$UC/bin/python3"
 printf '#!/bin/sh\n' > "$UC/app"
 uc_staged() { # running version, latest published
   rm -f "$UC/state"
-  PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST="$2" /bin/bash -c ". '$SCRIPT'; _cc_version='$1'; _cc_check_update '$UC/app' '$UC/state'" >/dev/null 2>&1
+  PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST="$2" /bin/bash -c ". '$SCRIPT'; _cc_version='$1'; _cc_check_update '$UC/app' '$UC/state' \$\$" >/dev/null 2>&1
   [ -s "$UC/state" ]
 }
 uc_staged 1.0.0 1.1.0; check "update check stages a newer release" $?
@@ -116,6 +116,8 @@ uc_staged 1.1.0 1.1.0; [ $? -ne 0 ]; check "update check ignores the same versio
 uc_staged 1.2.0 1.1.0; [ $? -ne 0 ]; check "update check ignores an older release" $?
 uc_staged 1.9.0 1.10.0; check "update check compares numerically (1.10.0 > 1.9.0)" $?
 rm -f "$UC"/.claude-copilot-update.*
+rm -f "$UC/state"; PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST=1.1.0 /bin/bash -c ". '$SCRIPT'; _cc_version=1.0.0; _cc_check_update '$UC/app' '$UC/state' 999999" >/dev/null 2>&1
+[ ! -e "$UC/state" ] && [ -z "$(ls -A "$UC" | grep '^.claude-copilot-update')" ]; check "update check drops its download when the launcher is gone" $?
 uc_state() { # extra env assignment
   env -i HOME="$UC" PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST= "$@" /bin/bash -c ". '$SCRIPT'; _cc_update_enabled=1; _cc_start_update_check '$UC/app'; wait; printf '[%s]' \"\${_cc_update_state:-}\""
 }
@@ -188,7 +190,7 @@ contains "$out" "--extra-flag value"; check "forwards user args to claude" $?
 [ "$(cat "$FLOW/shim.status")" = "404" ]; check "shim is serving while claude runs" $?
 [ "$(cat "$FLOW/shim.nokey")" = "401" ] && [ "$(cat "$FLOW/shim.badkey")" = "401" ]; check "shim rejects requests without the right key" $?
 [ -z "$(ls "$FLOW/tmp" | grep -v claude-copilot.log)" ]; check "port file removed after exit" $?
-[ -f "$FLOW/tmp/claude-copilot.log" ]; check "shim log is written to TMPDIR" $?
+[ -f "$FLOW/.local/share/claude-copilot/claude-copilot.log" ] && [ ! -e "$FLOW/tmp/claude-copilot.log" ]; check "shim log is written to the state dir" $?
 
 port=$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")
 sleep 0.3
@@ -242,6 +244,11 @@ env -i HOME="$FLOW/emptyhome" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" 
 check "login failure aborts before claude" $? "rc=$rc"
 
 # non-numeric port is rejected up front
+# outdated shim + COPILOT_SHIM_PORT equal to its port: restarted on that port, not "port busy"
+sf="$FLOW/.local/share/claude-copilot/shim.state"
+read -r op1 op2 op3 _ < "$sf"; port=$op2; echo "$op1 $op2 $op3 0.0.0-old" > "$sf"
+run_flow COPILOT_SHIM_PORT="$port"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" = "$port" ]; check "outdated shim restarts on the configured port" $? "rc=$rc $(cat "$FLOW/stderr")"
 rm -f "$FLOW/claude.out"
 run_flow COPILOT_SHIM_PORT=abc; rc=$?
 check "non-numeric COPILOT_SHIM_PORT fails" $((rc == 1 ? 0 : 1))
@@ -249,8 +256,8 @@ contains "$(cat "$FLOW/stderr")" "must be a port number"; check "non-numeric por
 [ ! -e "$FLOW/claude.out" ]; check "claude is not started on a bad port" $?
 
 # symlinked log path is refused
-mkdir -p "$FLOW/tmp2"; ln -sf "$FLOW/victim" "$FLOW/tmp2/claude-copilot.log"
-env -i HOME="$FLOW" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp2" COPILOT_TOKEN_FILE="$FLOW/token" /bin/bash "$SCRIPT" 2>"$FLOW/stderr"; rc=$?
+mkdir -p "$FLOW/st2"; ln -sf "$FLOW/victim" "$FLOW/st2/claude-copilot.log"
+env -i HOME="$FLOW" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_STATE_DIR="$FLOW/st2" COPILOT_TOKEN_FILE="$FLOW/token" /bin/bash "$SCRIPT" 2>"$FLOW/stderr"; rc=$?
 [ "$rc" -eq 1 ] && [ ! -e "$FLOW/victim" ]; check "symlinked log is refused, target untouched" $? "rc=$rc"
 
 # works under set -u (empty --settings array on old bash)
