@@ -14,8 +14,9 @@ def to_responses(j):
             t = b.get("type")
             if t == "text":
                 parts.append({"type": "output_text" if role == "assistant" else "input_text", "text": b["text"]})
-            elif t == "image" and b["source"].get("type") == "base64":
-                parts.append({"type": "input_image", "image_url": data_url(b["source"])})
+            elif t == "image":
+                parts.append({"type": "input_image", "image_url": data_url(b["source"])} if b["source"].get("type") == "base64"
+                             else {"type": "output_text" if role == "assistant" else "input_text", "text": "[image omitted]"})
             elif t == "tool_use":
                 add_msg(items, role, parts)
                 items.append({"type": "function_call", "call_id": b["id"], "name": b["name"], "arguments": json.dumps(b.get("input") or {})})
@@ -72,11 +73,12 @@ def to_chat(j):
         if imgs:
             msgs.append({"role": "user", "content": [{"type": "text", "text": IMG_NOTE}] +
                          [{"type": "image_url", "image_url": {"url": data_url(s)}} for s in imgs]})
-        rest = [b for b in bl if b.get("type") in ("text", "image")]
+        rest = [b if b["type"] == "text" or b["source"].get("type") == "base64" else {"type": "text", "text": "[image omitted]"}
+                for b in bl if b.get("type") in ("text", "image")]
         if any(b["type"] == "image" for b in rest):
             parts = [{"type": "text", "text": b["text"]} if b["type"] == "text" else
                      {"type": "image_url", "image_url": {"url": data_url(b["source"])}}
-                     for b in rest if b["type"] == "text" or b["source"].get("type") == "base64"]
+                     for b in rest]
             msgs.append({"role": "user", "content": parts})
         elif rest:
             msgs.append({"role": "user", "content": "\n\n".join(b["text"] for b in rest)})

@@ -33,6 +33,7 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
                     self.sse("content_block_start", index=idx, content_block={"type": "text", "text": ""})
                 self.sse("content_block_delta", index=open_[oi], delta={"type": "text_delta", "text": e["delta"]})
             elif t == "response.function_call_arguments.delta":
+                if oi not in open_: continue
                 sent.add(oi); self.sse("content_block_delta", index=open_[oi], delta={"type": "input_json_delta", "partial_json": e["delta"]})
             elif t == "response.output_item.done" and oi in open_:
                 if e["item"]["type"] == "function_call" and oi not in sent and e["item"].get("arguments"):
@@ -49,10 +50,11 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
         if not done: self.sse("error", **err("upstream stream ended early"))
     def stream_chat(self, r, model):
         self.start_stream(model)
-        idx, cur, tool_open, tools, stop, use, done = -1, None, False, {}, None, {}, False
-        def close():
-            nonlocal cur, tool_open
-            if cur is not None: self.sse("content_block_stop", index=cur); cur = None; tool_open = False
+        idx, cur, tools, pend, stop, use, done = -1, None, {}, {}, None, {}, False
+        def close_text():
+            nonlocal cur
+            if cur is not None: self.sse("content_block_stop", index=cur); cur = None
+        def args(n, a): self.sse("content_block_delta", index=tools[n], delta={"type": "input_json_delta", "partial_json": a})
         for e in sse_events(r):
             if e.get("type") == "[DONE]": done = True; break
             if e.get("usage"): use = e["usage"]
@@ -60,19 +62,22 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
             if not ch: continue
             d = ch.get("delta") or {}
             if d.get("content"):
-                if cur is None or tool_open:
-                    close(); idx += 1; cur = idx
+                if cur is None:
+                    idx += 1; cur = idx
                     self.sse("content_block_start", index=idx, content_block={"type": "text", "text": ""})
                 self.sse("content_block_delta", index=cur, delta={"type": "text_delta", "text": d["content"]})
             for tc in d.get("tool_calls") or []:
                 n = tc.get("index", 0); f = tc.get("function") or {}
                 if f.get("name") and (n not in tools or tc.get("id")):
-                    close(); idx += 1; cur = idx; tools[n] = idx; tool_open = True
+                    close_text(); idx += 1; tools[n] = idx
                     self.sse("content_block_start", index=idx, content_block={"type": "tool_use", "id": tc.get("id") or "call_" + uuid.uuid4().hex[:24], "name": f["name"], "input": {}})
-                if f.get("arguments") and n in tools:
-                    self.sse("content_block_delta", index=tools[n], delta={"type": "input_json_delta", "partial_json": f["arguments"]})
-            if ch.get("finish_reason"): stop = ch["finish_reason"]; close()
-        close()
+                    if pend.get(n): args(n, pend.pop(n))
+                if f.get("arguments"):
+                    if n in tools: args(n, f["arguments"])
+                    else: pend[n] = pend.get(n, "") + f["arguments"]
+            if ch.get("finish_reason"): stop = ch["finish_reason"]
+        close_text()
+        for i in tools.values(): self.sse("content_block_stop", index=i)
         if stop is None and not done:
             self.sse("error", **err("upstream stream ended early")); return
         self.sse("message_delta", delta={"stop_reason": "max_tokens" if stop == "length" else "tool_use" if tools else CHAT_STOP.get(stop, "end_turn"), "stop_sequence": None}, usage=chat_usage(use))
@@ -121,7 +126,8 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
                     THINK[(j["model"], j["thinking"].get("type"))] = new
                     log("shim: %s rejects thinking %s, using %s" % (j["model"], j["thinking"].get("type"), new)); adapt_thinking(j); continue
                 log("shim: native %s: %s" % (e.code, data.decode(errors="replace")[:400]))
-                return self.reply(e.code, obj)
+                ra = e.headers.get("retry-after") if e.headers else None
+                return self.reply(e.code, obj, {"retry-after": ra} if ra else None)
             except RuntimeError:
                 raise
             except Exception as e:

@@ -140,7 +140,7 @@ Installer vars (only read by `install.sh` / `uninstall.sh`):
 
 Files:
 
-- `$TMPDIR/claude-copilot.log`: shim log (errors, dropped fields, upstream status codes)
+- `~/.local/share/claude-copilot/claude-copilot.log`: shim log (errors, dropped fields, upstream status codes)
 - `~/.local/share/claude-copilot/github_token`: your GitHub token. Delete it to log in again.
 
 ## Tested models
@@ -159,7 +159,7 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 
 - **Unofficial:** this uses GitHub's private Copilot endpoints, with the VS Code Copilot client id and headers. It may break when GitHub changes things, and may be against GitHub's terms. Your call.
 - **Billing:** premium requests count against your Copilot plan.
-- **Rate limits:** Copilot rate-limits per account and model tier (the small "utility" models like gpt-4o-mini hit it first). On a 429 Claude Code retries until it gives up, so it looks like a hang. Look for `429` in `$TMPDIR/claude-copilot.log`, wait it out.
+- **Rate limits:** Copilot rate-limits per account and model tier (the small "utility" models like gpt-4o-mini hit it first). On a 429 Claude Code retries until it gives up, so it looks like a hang. Look for `429` in `~/.local/share/claude-copilot/claude-copilot.log`, wait it out.
 - **Non-Claude models:** GPT/Gemini/Kimi go through a translation layer, tool calling can be less reliable than Claude. Thinking blocks and prompt-cache controls are not translated. Images inside tool results (e.g. reading a screenshot) are re-sent as a follow-up user message, since these APIs only take text in tool results. Upstream errors are mapped to Anthropic error types, `Retry-After` is forwarded, and context-length errors get a "prompt is too long" prefix so Claude Code can compact. A reply cut off by the token limit ends with `max_tokens`, even mid tool call. Non-streaming tool arguments that aren't valid JSON are logged and passed as `{}`.
 - **Premium-request accounting:** requests that already have an assistant turn are sent with `x-initiator: agent`, same as the VS Code client does for tool follow-ups. Whether Copilot bills those differently is up to GitHub.
 - **Pinned client identity:** the VS Code / Copilot Chat versions sent in headers default to hardcoded values. If GitHub starts rejecting them, set `COPILOT_EDITOR_VERSION` / `COPILOT_PLUGIN_VERSION` (or update the defaults).
@@ -175,7 +175,7 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 - **"GitHub refused the Copilot token request":** the stored login is bad or the account has no Copilot access. Delete `~/.local/share/claude-copilot/github_token` and rerun.
 - **Background agent says it is not logged in:** run `claude-copilot` once from an interactive terminal so the GitHub device login is stored. The launcher reuses that stored login and puts the shim URL/key in the session settings for background agents; it does not ask you to log in again.
 - **503 "model list unavailable":** the shim couldn't fetch Copilot's `/models`. It retries after about 30s.
-- **Shim didn't start:** check `$TMPDIR/claude-copilot.log`.
+- **Shim didn't start:** check `~/.local/share/claude-copilot/claude-copilot.log`.
 - **400 `model_not_supported`:** the model ID doesn't exist on Copilot. `/model` only lists the ones that do.
 - **400 "prefill" on a Claude 5.x model:** the request shape changed. Look at the log.
 - **400 "Extra inputs are not permitted" showing up for the client:** the shim couldn't find the field Copilot named, or hit the 5-retry cap. Look at the log for the field name.

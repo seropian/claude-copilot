@@ -714,6 +714,43 @@ class Server(Base):
         self.assertEqual(json.loads(data)["error"]["type"], "rate_limit_error")
         self.assertEqual(h.headers.get("retry-after"), "7")
 
+    def test_native_429_keeps_retry_after(self):
+        self.models(model_entry("claude-x", ["/v1/messages"]))
+        self.up.json("/v1/messages", {"error": {"message": "slow"}}, status=429, headers={"Retry-After": "9"})
+        s, _, h = self.post({"model": "claude-x", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual((s, h.headers.get("retry-after")), (429, "9"))
+
+    def test_stream_chat_interleaved_tools_and_early_args(self):
+        self.models(model_entry("c", ["/chat/completions"]))
+        tc = lambda n, **f: {"choices": [{"delta": {"tool_calls": [{"index": n, **({"id": "i%d" % n} if "name" in f else {}), "function": f}]}}]}
+        self.up.sse("/chat/completions", [
+            tc(0, arguments='{"a"'), tc(0, name="f"), tc(1, name="g"),
+            tc(0, arguments=":1}"), tc(1, arguments="{}"),
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}, {"type": "[DONE]"}])
+        _, data, _ = self.post({"model": "c", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        ev = self.events(data)
+        stops = [e["index"] for e in ev if e["type"] == "content_block_stop"]
+        last_delta = max(i for i, e in enumerate(ev) if e["type"] == "content_block_delta")
+        first_stop = min(i for i, e in enumerate(ev) if e["type"] == "content_block_stop")
+        self.assertLess(last_delta, first_stop)
+        self.assertEqual(sorted(stops), [0, 1])
+        a0 = "".join(e["delta"]["partial_json"] for e in ev if e["type"] == "content_block_delta" and e["index"] == 0)
+        self.assertEqual(a0, '{"a":1}')
+
+    def test_stream_responses_args_for_unopened_index_ignored(self):
+        self.models(model_entry("gpt", ["/responses"]))
+        self.up.sse("/responses", [
+            {"type": "response.function_call_arguments.delta", "output_index": 3, "delta": "{}"},
+            {"type": "response.completed", "response": {}},
+        ])
+        _, data, _ = self.post({"model": "gpt", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(self.events(data)[-1]["type"], "message_stop")
+
+    def test_url_image_becomes_placeholder(self):
+        j = {"model": "m", "messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": "http://x/y.png"}}]}]}
+        self.assertEqual(shim.to_chat(j)["messages"][0]["content"], "[image omitted]")
+        self.assertEqual(shim.to_responses(j)["input"][0]["content"], [{"type": "input_text", "text": "[image omitted]"}])
+
     def test_upstream_unreachable_is_502(self):
         shim.MODELS.update(at=time.time(), data=[model_entry("gpt", ["/responses"])])
         shim.CT["api"] = "http://127.0.0.1:1"
