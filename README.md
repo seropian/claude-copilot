@@ -71,10 +71,10 @@ The release workflow is the only publishing step. It never commits `dist/`; reru
 claude-copilot                 # interactive
 claude-copilot -p "prompt"     # one-shot
 claude-copilot -c              # resume last session
-COPILOT_CLAUDE_MODEL=claude-opus-5.5 claude-copilot
+COPILOT_CLAUDE_MODEL=claude-opus-5.5 claude-copilot  # optional explicit override (otherwise use /model)
 ```
 
-All args go straight to `claude`. Exit code is passed through.
+All args go straight to `claude`. Exit code is passed through. If `COPILOT_CLAUDE_MODEL` is unset, Claude Code uses the model saved by `/model` (or its own default on the first run).
 
 ## How it works
 
@@ -118,7 +118,7 @@ All env vars, all optional.
 
 | Var | Default | What |
 |---|---|---|
-| `COPILOT_CLAUDE_MODEL` | `claude-sonnet-5.5` | main model |
+| `COPILOT_CLAUDE_MODEL` | unset (Claude Code's saved `/model` selection) | explicit main model override |
 | `COPILOT_SONNET_MODEL` | `claude-sonnet-5.5` | `sonnet` alias target |
 | `COPILOT_OPUS_MODEL` | `claude-opus-5.5` | `opus` alias target |
 | `COPILOT_FABLE_MODEL` | `claude-opus-5.5` | `fable` alias target. Copilot has no Fable model, so picking it really gives you whatever this points to |
