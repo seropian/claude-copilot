@@ -180,12 +180,21 @@ out=$(cat "$FLOW/claude.out" 2>/dev/null)
 contains "$out" "BASE=http://127.0.0.1:"; check "launcher points ANTHROPIC_BASE_URL at the local shim" $?
 case "$out" in *TOKEN=????????????????????????*) t=0 ;; *) t=1 ;; esac; check "launcher sets a random per-run auth token" $t
 ! contains "$out" "TOKEN=placeholder"; check "auth token is not the old placeholder" $?
-contains "$out" "MODEL=claude-sonnet-5.5"; check "default model is claude-sonnet-5.5" $?
+contains "$out" "MODEL="; check "default leaves model selection to Claude Code" $?
 contains "$out" "SONNET=claude-sonnet-5.5"; check "default sonnet mapping" $?
 contains "$out" "OPUS=claude-opus-5.5"; check "default opus mapping" $?
 contains "$out" "HAIKU=claude-haiku-4.5"; check "default haiku mapping" $?
 contains "$out" "NONESS=1"; check "nonessential traffic disabled" $?
-contains "$out" "ARGS=--model claude-sonnet-5.5"; check "passes --model to claude" $?
+case "$out" in *"ARGS=--model"*) t=1 ;; *) t=0 ;; esac
+check "default does not pass --model to claude" $?
+
+run_flow ANTHROPIC_MODEL=caller-model
+out=$(cat "$FLOW/claude.out")
+contains "$out" "MODEL="; check "default clears caller model override" $?
+
+run_flow COPILOT_CLAUDE_MODEL=
+out=$(cat "$FLOW/claude.out")
+contains "$out" "MODEL=" && ! contains "$out" "ARGS=--model"; check "empty model override uses Claude Code selection" $?
 contains "$out" "--extra-flag value"; check "forwards user args to claude" $?
 [ "$(cat "$FLOW/shim.status")" = "404" ]; check "shim is serving while claude runs" $?
 [ "$(cat "$FLOW/shim.nokey")" = "401" ] && [ "$(cat "$FLOW/shim.badkey")" = "401" ]; check "shim rejects requests without the right key" $?
