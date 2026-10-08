@@ -4,6 +4,8 @@
 # Skips (exit 0) when either is missing. Spends a few small Copilot requests per model.
 # Run: bash tests/test_e2e.sh
 # Models per route (override as needed): E2E_NATIVE, E2E_RESPONSES, E2E_CHAT. Missing ones are skipped.
+# E2E_ALL_MODELS=1 tests each chat model exposed by the shim with a 512-token cap.
+# Run with E2E=1 E2E_ALL_MODELS=1 bash tests/run.sh; sends one extra request per model.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/dist/claude-copilot.sh"
@@ -48,8 +50,8 @@ dpid=$!
 port=""
 for _ in $(seq 1 50); do read -r _ port 2>/dev/null < "$pf"; [ -n "$port" ] && break; sleep 0.1; done
 avail=$(curl -sf -m 30 -H "x-api-key: e2e-disc" "http://127.0.0.1:$port/v1/models" 2>/dev/null)
-kill "$dpid" 2>/dev/null
 if [ -z "$avail" ]; then bad "shim lists models from real Copilot" "$(cat "$TMP/disc.log")"; echo "$pass passed, $fail failed"; exit 1; fi
+# Keep the discovery shim running for the optional all-model probes below.
 ok "shim lists models from real Copilot"
 has_model() { contains "$avail" "\"id\": \"$1\"" || contains "$avail" "\"id\":\"$1\""; }
 
@@ -71,6 +73,33 @@ for entry in "native:$NATIVE" "responses:$RESPONSES" "chat:$CHAT"; do
   COPILOT_CLAUDE_MODEL="$model" run 180 -p "Count from 1 to 5, one number per line." --output-format stream-json --verbose
   if [ $RC -eq 0 ] && contains "$OUT" '"type":"result"' && contains "$OUT" '"is_error":false'; then ok "$route route ($model): streaming completes cleanly"; else bad "$route route ($model): streaming (rc=$RC)" "$OUT"; fi
 done
+
+# ---------- every model exposed by the shim ----------
+
+if [ "${E2E_ALL_MODELS:-0}" = 1 ]; then
+  all_models=$(python3 -c 'import json,sys; print("\n".join(m["id"] for m in json.load(sys.stdin).get("data", []) if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]))' <<<"$avail")
+  if [ -z "$all_models" ]; then
+    bad "all-model check: no models in shim catalog" "$avail"
+  else
+    while IFS= read -r model; do
+      [ -n "$model" ] || continue
+      body=$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 512, "messages": [{"role": "user", "content": "Reply with exactly the word PONG and nothing else."}]}))' "$model")
+      result=$(curl -sS -m 120 -w '\n%{http_code}' -H "x-api-key: e2e-disc" -H "content-type: application/json" -d "$body" "http://127.0.0.1:$port/v1/messages" 2>&1)
+      curl_rc=$?
+      status=${result##*$'\n'}
+      response=${result%$'\n'*}
+      if [ $curl_rc -eq 0 ] && [ "$status" = 200 ] && python3 -c 'import json,sys; j=json.load(sys.stdin); sys.exit(0 if any(isinstance(b,dict) and b.get("type")=="text" and isinstance(b.get("text"),str) and b["text"].strip() for b in j.get("content",[])) else 1)' <<<"$response"; then
+        ok "all-model check ($model): non-empty response"
+      else
+        bad "all-model check ($model): request failed (curl=$curl_rc http=$status)" "$response"
+      fi
+    done <<<"$all_models"
+  fi
+fi
+
+# Discovery is complete; launcher behavior checks use their own shims.
+kill "$dpid" 2>/dev/null
+dpid=""
 
 # ---------- launcher behavior against the real thing ----------
 

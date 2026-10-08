@@ -351,13 +351,48 @@ class Chat(unittest.TestCase):
 # ---------- model picker ----------
 
 class Picker(Base):
-    def test_picker_models_filters(self):
-        self.models(model_entry("a", [], name="A"), model_entry("b", [], picker=False), model_entry("emb", [], typ="embeddings"))
+    def test_picker_models_filters_by_picker_flag_and_chat_type(self):
+        self.models(model_entry("a", [], name="A"), model_entry("b", [], picker=False),
+                    model_entry("emb", [], typ="embeddings"))
         self.assertEqual(shim.picker_models(), [{"type": "model", "id": "a", "display_name": "A"}])
 
+    def test_picker_models_marks_preview_models(self):
+        preview = model_entry("preview", [], name="Preview Model")
+        preview["preview"] = True
+        self.models(model_entry("regular", [], name="Regular Model"), preview)
+        self.assertEqual(shim.picker_models(), [
+            {"type": "model", "id": "regular", "display_name": "Regular Model"},
+            {"type": "model", "id": "preview", "display_name": "Preview Model (Preview)"},
+        ])
+
+    def test_picker_models_skips_malformed_and_duplicate_entries(self):
+        duplicate = model_entry("a", [], name="duplicate")
+        self.models(model_entry("a", [], name="A"), duplicate, {"capabilities": {"type": "chat"}}, {"id": "emb"})
+        self.assertEqual(shim.picker_models(), [{"type": "model", "id": "a", "display_name": "A"}])
+
+    def test_picker_models_skips_malformed_capabilities(self):
+        self.models({"id": "bad-list", "capabilities": []},
+                    {"id": "bad-string", "capabilities": "chat"},
+                    model_entry("a", []))
+        self.assertEqual(shim.picker_models(), [{"type": "model", "id": "a", "display_name": "a"}])
+
+    def test_picker_models_uses_id_for_non_string_name(self):
+        self.models({"id": "a", "name": ["not", "a", "name"], "model_picker_enabled": True,
+                     "capabilities": {"type": "chat"}})
+        self.assertEqual(shim.picker_models(), [{"type": "model", "id": "a", "display_name": "a"}])
+
+    def test_picker_models_skips_non_dict_entries(self):
+        self.models("not a model", model_entry("a", []))
+        self.assertEqual(shim.picker_models(), [{"type": "model", "id": "a", "display_name": "a"}])
+
     def test_picker_settings(self):
-        self.models(model_entry("a", [], name="A"))
-        self.assertEqual(shim.picker_settings(), {"modelPicker": {"options": [{"model": "a", "label": "A"}]}})
+        preview = model_entry("b", [], name="B")
+        preview["preview"] = True
+        self.models(model_entry("a", [], name="A"), preview)
+        self.assertEqual(shim.picker_settings(), {"modelPicker": {"options": [
+            {"model": "a", "label": "A"},
+            {"model": "b", "label": "B (Preview)"},
+        ]}})
 
     def test_picker_settings_empty(self):
         self.models()

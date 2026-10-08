@@ -26,7 +26,6 @@ Release assets are available at:
 
 ```text
 https://github.com/seropian/claude-copilot/releases/latest/download/claude-copilot.sh
-https://github.com/seropian/claude-copilot/releases/download/v0.1.0/claude-copilot.sh
 ```
 
 Verify a downloaded asset with the checksum from the same release:
@@ -100,7 +99,7 @@ One small Python server (bundled into the script) sits between Claude Code and C
         - A rejected `adaptive` (claude-haiku-4.5) is passed through untouched, Claude Code retries without thinking by itself.
     - `/v1/messages/count_tokens` is forwarded to Copilot for models on its native endpoint, which returns a real count. Other models, or any failure, get a rough estimate (request size in bytes / 4).
 - Model aliases (sonnet/opus/haiku/fable) are mapped to Copilot model IDs, since Anthropic's IDs don't exist on Copilot.
-- At startup the script asks the shim for the model list (chat models Copilot marks `model_picker_enabled`, so no embeddings, internal models, or the old gpt-3*/gpt-4* families) and passes it to `claude --settings` as a `modelPicker` list, so `/model` shows all of them. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
+- At startup the script asks the shim for the model list (chat models Copilot marks `model_picker_enabled`; embeddings and other non-chat or hidden models are excluded) and passes it to `claude --settings` as a `modelPicker` list, so `/model` shows selectable chat models. Preview models are labeled `(Preview)`. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
 
 Lifecycle:
 
@@ -147,11 +146,14 @@ Files:
 
 **Last checked 2026-10-02 with Claude Code 2.1.286, results may be stale.** Each model got a plain "reply ok" check and a Bash tool-call check, streaming, through the shim. Images were checked on one model per route (claude-sonnet-5.5, gpt-5.5, gemini-3.7-flash).
 
-- **Work (all 24 in the picker):** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-4.5, gemini-3.7-flash, gemini-3.8-flash, gpt-5.3-codex, gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-5-mini, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, kimi-k2.7-code, kimi-k3, mai-code-1.1-flash
-- **Hidden from the picker** (Copilot doesn't mark them for the model picker, you can still pass them with `COPILOT_CLAUDE_MODEL`, they go through `/chat/completions`):
+- **Work (models tested on 2026-10-02):** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-4.5, gemini-3.7-flash, gemini-3.8-flash, gpt-5.3-codex, gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-5-mini, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, kimi-k2.7-code, kimi-k3, mai-code-1.1-flash
+- **Legacy or untested chat models:** these appear in the picker only when Copilot includes them in `/models` and marks them `model_picker_enabled`; they go through `/chat/completions`:
     - gpt-4, gpt-4-0613, gpt-4-0125-preview: work (checked 2026-10-02)
     - gpt-4o*, gpt-4.1*, gpt-3.5-turbo*, gpt-4-o-preview: untested. Every call got 429 "exceeded your rate limit for utility models" (account-level limit after a burst of test requests)
     - gpt-41-copilot: 400 model_not_supported
+    - Availability depends on the models returned for your Copilot plan.
+
+Even models shown in the picker can be rate-limited or unsupported by Copilot; the list reflects the API catalog, not a guarantee that every model accepts requests.
 
 Not tested: `auto`. The model list depends on your Copilot plan.
 
