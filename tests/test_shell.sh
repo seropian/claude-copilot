@@ -685,7 +685,10 @@ grep -q "$key" "$sfile"; check "settings file carries the shim key" $?
 
 # Cached model discovery never waits for the live model catalog.
 PICKER="$CW/home/.local/share/claude-copilot/model-picker.json"
-for i in $(seq 1 50); do [ -f "$PICKER" ] && break; sleep 0.1; done
+for i in $(seq 1 50); do
+  grep -q 'test-model' "$PICKER" 2>/dev/null && break
+  sleep 0.1
+done
 printf '%s\n' '{"modelPicker":{"options":[{"model":"cached-model","label":"Cached model"},{"model":"another-model","label":"Another model"}]},"env":{"ANTHROPIC_BASE_URL":"http://wrong","UNTRUSTED_CACHE_ENV":"bad"}}' > "$PICKER"
 picker_t0=$("$PY" -c 'import time; print(time.monotonic())')
 cw_run env FAKE_PICKER=slow /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1; picker_rc=$?
