@@ -125,6 +125,21 @@ case "$(uc_state X=1)" in "[]") false ;; *) true ;; esac; check "update check is
 [ "$(uc_state COPILOT_AUTO_UPDATE=0)" = "[]" ]; check "COPILOT_AUTO_UPDATE=0 turns the update check off" $?
 rm -f "$UC"/.claude-copilot-update-state.*
 
+# ---------- runtime version ----------
+
+VERSION=$(tr -d '\n' < "$ROOT/VERSION")
+VERSION_HOME="$TMP/version-home"
+out=$(env -i HOME="$VERSION_HOME" PATH="$TMP/none" /bin/bash "$SCRIPT" --version 2>&1); rc=$?
+check "--version exits 0 without prerequisites" $rc "$out"
+[ "$out" = "claude-copilot $VERSION" ]; check "--version prints the embedded version" $?
+[ ! -e "$VERSION_HOME/.local/share/claude-copilot" ]; check "--version does not start the shim" $?
+out=$(env -i HOME="$VERSION_HOME" PATH="$TMP/none" /bin/bash "$SCRIPT" -v 2>&1); rc=$?
+check "-v exits 0" $rc "$out"
+[ "$out" = "claude-copilot $VERSION" ]; check "-v matches --version" $?
+out=$(env -i HOME="$VERSION_HOME" PATH="$TMP/none" /bin/bash "$SCRIPT" -V 2>&1); rc=$?
+check "-V compatibility alias exits 0" $rc "$out"
+[ "$out" = "claude-copilot $VERSION" ]; check "-V matches --version" $?
+
 # ---------- sourcing vs executing ----------
 
 out=$(/bin/bash -c ". '$SCRIPT'; type claude-copilot" 2>&1); rc=$?
@@ -145,7 +160,25 @@ fi
 # ---------- full launcher flow with a fake claude ----------
 
 FLOW="$TMP/flow"; mkdir -p "$FLOW/bin" "$FLOW/tmp"
-ln -sf "$PY" "$FLOW/bin/python3"; ln -sf "$CURL" "$FLOW/bin/curl"
+ln -sf "$PY" "$FLOW/bin/python3"
+cat > "$FLOW/bin/curl" <<EOF
+#!/bin/sh
+case "\$*" in
+  *claude-settings*)
+    cat >/dev/null
+    while [ \$# -gt 0 ]; do
+      if [ "\$1" = -o ]; then
+        echo '{"modelPicker":{"options":[{"model":"test-model","label":"Test model"}]}}' > "\$2"
+        exit 0
+      fi
+      shift
+    done
+    exit 1
+    ;;
+  *) exec "$CURL" "\$@" ;;
+esac
+EOF
+chmod +x "$FLOW/bin/curl"
 cat > "$FLOW/bin/claude" <<EOF
 #!/bin/sh
 {
@@ -325,7 +358,7 @@ out=$(HOME="$LR" /bin/bash -c "
 # Slow legacy cleanup runs after the session in the background: it never delays claude or a concurrent launch.
 SC="$FLOW/slow-cleanup"; SC_STATE="$SC/home/.local/share/claude-copilot"
 mkdir -p "$SC/bin" "$SC/tmp" "$SC_STATE"
-ln -sf "$CURL" "$SC/bin/curl"
+ln -sf "$FLOW/bin/curl" "$SC/bin/curl"
 cat > "$SC/bin/python3" <<EOF
 #!/bin/sh
 if [ "\$3" = cleanup ]; then
@@ -342,6 +375,7 @@ echo "\$ANTHROPIC_BASE_URL" >> "$SC/claude.log"
 EOF
 chmod +x "$SC/bin/python3" "$SC/bin/claude"
 echo 0.0.1 > "$SC_STATE/last-version"
+printf '%s\n' '{"modelPicker":{"options":[{"model":"test-model","label":"Test model"}]}}' > "$SC_STATE/model-picker.json"
 sc_run() { env -i HOME="$SC/home" PATH="$SC/bin:/usr/bin:/bin" TMPDIR="$SC/tmp" COPILOT_TOKEN_FILE="$FLOW/token" /bin/bash "$SCRIPT" >/dev/null 2>&1; }
 sc_t0=$(date +%s); sc_run; sc_rc=$?; sc_t1=$(date +%s)
 [ "$sc_rc" = 0 ] && [ "$(wc -l < "$SC/claude.log")" -eq 1 ] && [ $((sc_t1 - sc_t0)) -lt 5 ] && [ ! -e "$SC/cleanup.done" ]
@@ -391,7 +425,7 @@ env -i HOME="$FLOW" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TO
 check "launcher works under set -u" $rc "$(cat "$FLOW/stderr")"
 
 # fake python3: the real one, except `serve` either hangs (never writes the port file) or dies at once
-mkdir -p "$FLOW/pybin"; ln -sf "$CURL" "$FLOW/pybin/curl"; cp "$FLOW/bin/claude" "$FLOW/pybin/claude"
+mkdir -p "$FLOW/pybin"; ln -sf "$FLOW/bin/curl" "$FLOW/pybin/curl"; cp "$FLOW/bin/claude" "$FLOW/pybin/claude"
 cat > "$FLOW/pybin/python3" <<FAKEPY
 #!/bin/sh
 if [ "\$3" = serve ]; then
@@ -492,7 +526,7 @@ env -i HOME="$IN/home" PATH="$IN/bin:/usr/bin:/bin" /bin/bash "$INSTALL" >/dev/n
 
 # claude gets CLAUDE_CODE_PROCESS_WRAPPER pointing at the launcher
 CW="$TMP/cw"; mkdir -p "$CW/bin" "$CW/tmp" "$CW/home"
-ln -sf "$PY" "$CW/bin/python3"; ln -sf "$CURL" "$CW/bin/curl"
+ln -sf "$PY" "$CW/bin/python3"; ln -sf "$FLOW/bin/curl" "$CW/bin/curl"
 cat > "$CW/bin/claude" <<FAKE
 #!/bin/sh
 echo "\$ANTHROPIC_BASE_URL \$CLAUDE_CODE_PROCESS_WRAPPER \$CLAUDE_COPILOT_WRAP" >> "$CW/claude.log"
@@ -619,9 +653,37 @@ FAKE
 rm -f "$CW/bin/curl"
 cat > "$CW/bin/curl" <<FAKE
 #!/bin/sh
-case "\$*" in *claude-settings*) cat >/dev/null; echo '{}' ;; *) exec "$CURL" "\$@" ;; esac
+case "\$*" in
+  *claude-settings*)
+    cat >/dev/null
+    while [ \$# -gt 0 ]; do
+      if [ "\$1" = -m ]; then timeout="\$2"; fi
+      if [ "\$1" = -o ]; then output="\$2"; break; fi
+      shift
+    done
+    case "\${FAKE_PICKER:-}" in
+      slow)
+        echo \$\$ > "$CW/picker.started"
+        exec "$PY" -c 'import json,sys,time; timeout=float(sys.argv[2]); time.sleep(min(6, timeout)); sys.exit(28) if timeout < 6 else json.dump({"modelPicker":{"options":[{"model":"fresh-model","label":"Fresh model"}]}}, open(sys.argv[1], "w"))' "\$output" "\$timeout"
+        ;;
+      fail) exit 22 ;;
+      empty) echo '{}' > "\$output" ;;
+      *)
+        echo '{"modelPicker":{"options":[{"model":"test-model","label":"Test model"}]}}' > "\$output"
+        if [ ! -e "$CW/picker.initial" ]; then
+          : > "$CW/picker.initial"
+          printf '1\n' > "$CW/picker.done"
+        else
+          printf '2\n' > "$CW/picker.done"
+        fi
+        ;;
+    esac
+    ;;
+  *) exec "$CURL" "\$@" ;;
+esac
 FAKE
 chmod +x "$CW/bin/curl"
+rm -f "$CW/picker.done" "$CW/picker.initial"
 cw_run /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1
 sfile=$(sed -n '/^--settings$/{n;p;}' "$CW/claude.args")
 [ -f "$sfile" ]; check "--settings is a file path" $? "$(cat "$CW/claude.args")"
@@ -629,6 +691,68 @@ key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["env"]["AN
 [ -n "$key" ] && ! grep -q "$key" "$CW/claude.args"; check "shim key is not in claude's argv" $?
 grep -q "$key" "$sfile"; check "settings file carries the shim key" $?
 [ "$(ls -l "$sfile" | cut -c1-10)" = "-rw-------" ]; check "settings file is mode 600" $?
+
+# Cached model discovery never waits for the live model catalog.
+PICKER="$CW/home/.local/share/claude-copilot/model-picker.json"
+for i in $(seq 1 50); do
+  if grep -q 'initial-model' "$PICKER" 2>/dev/null && ! find "$CW/home/.local/share/claude-copilot" -maxdepth 1 -name 'model-picker.*' -print -quit | grep -q .; then
+    break
+  fi
+  sleep 0.1
+done
+printf '%s\n' '{"modelPicker":{"options":[{"model":"cached-model","label":"Cached model"},{"model":"another-model","label":"Another model"}]},"env":{"ANTHROPIC_BASE_URL":"http://wrong","UNTRUSTED_CACHE_ENV":"bad"}}' > "$PICKER"
+picker_t0=$("$PY" -c 'import time; print(time.monotonic())')
+cw_run env FAKE_PICKER=slow /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1; picker_rc=$?
+"$PY" -c 'import sys,time; sys.exit(not (time.monotonic() - float(sys.argv[1]) < 3))' "$picker_t0"
+check "slow model discovery does not delay Claude launch" $? "rc=$picker_rc"
+sfile=$(sed -n '/^--settings$/{n;p;}' "$CW/claude.args")
+"$PY" -c 'import json,sys; s=json.load(open(sys.argv[1])); assert [o["model"] for o in s["modelPicker"]["options"]] == ["cached-model","another-model"]; assert s["env"]["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"); assert "UNTRUSTED_CACHE_ENV" not in s["env"]' "$sfile"
+check "startup uses cached picker and only trusted connection settings" $?
+for i in $(seq 1 100); do
+  grep -q fresh-model "$PICKER" 2>/dev/null && break
+  sleep 0.1
+done
+grep -q fresh-model "$PICKER"; check "background discovery atomically refreshes picker cache" $?
+[ "$(ls -l "$PICKER" | cut -c1-10)" = "-rw-------" ]; check "picker cache is mode 600" $?
+cw_run env FAKE_PICKER=fail /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1; picker_rc=$?
+sfile=$(sed -n '/^--settings$/{n;p;}' "$CW/claude.args")
+"$PY" -c 'import json,sys; assert json.load(open(sys.argv[1]))["modelPicker"]["options"][0]["model"] == "fresh-model"' "$sfile"
+check "next launch uses refreshed model picker" $?
+for i in $(seq 1 50); do
+  grep -q 'model picker refresh failed' "$CW/home/.local/share/claude-copilot/claude-copilot.log" && break
+  sleep 0.1
+done
+grep -q fresh-model "$PICKER"; check "failed refresh preserves the last good cache" $?
+grep -q 'model picker refresh failed' "$CW/home/.local/share/claude-copilot/claude-copilot.log"
+check "failed background refresh is logged" $?
+
+rm -f "$PICKER"
+rm -f "$CW/claude.args"
+picker_t0=$("$PY" -c 'import time; print(time.monotonic())')
+cw_run env FAKE_PICKER=slow /bin/bash "$SCRIPT" -p hi >/dev/null 2>"$CW/cache.stderr"; picker_rc=$?
+"$PY" -c 'import sys,time; sys.exit(not (time.monotonic() - float(sys.argv[1]) < 7))' "$picker_t0"
+check "missing model list fetch has a strict startup deadline" $? "rc=$picker_rc"
+[ "$picker_rc" = 1 ] && [ ! -e "$CW/claude.args" ]
+check "Claude is never launched without the complete model list" $?
+contains "$(cat "$CW/cache.stderr")" "complete model list unavailable"
+check "model list timeout gives an actionable error" $?
+[ -z "$(ls -A "$CW/home/.local/share/claude-copilot/leases")" ]
+check "model list startup failure releases the client lease" $?
+cw_run /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1; picker_rc=$?
+sfile=$(sed -n '/^--settings$/{n;p;}' "$CW/claude.args")
+"$PY" -c 'import json,sys; s=json.load(open(sys.argv[1])); assert s["modelPicker"]["options"][0]["model"] == "test-model"; assert s["env"]["ANTHROPIC_AUTH_TOKEN"]' "$sfile"
+check "cold launch fetches full picker and connection settings before Claude" $?
+sleep 0.2
+printf '%s\n' 'not json' > "$PICKER"
+rm -f "$CW/claude.args"
+cw_run env FAKE_PICKER=fail /bin/bash "$SCRIPT" -p hi >/dev/null 2>"$CW/cache.stderr"; picker_rc=$?
+contains "$(cat "$CW/cache.stderr")" "invalid model picker cache"
+check "corrupt picker cache is reported" $?
+[ "$picker_rc" = 1 ] && [ ! -e "$CW/claude.args" ]
+check "corrupt cache and failed discovery cannot launch an incomplete picker" $?
+cw_run env FAKE_PICKER=empty /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1; picker_rc=$?
+[ "$picker_rc" = 1 ] && [ ! -e "$CW/claude.args" ]
+check "empty model catalog cannot launch Claude" $?
 
 echo
 echo "$pass passed, $fail failed"

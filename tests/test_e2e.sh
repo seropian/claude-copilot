@@ -17,7 +17,7 @@ ok()   { pass=$((pass + 1)); echo "ok   - $1"; }
 bad()  { fail=$((fail + 1)); echo "FAIL - $1"; [ -n "${2:-}" ] && echo "       $2" | head -c 600; }
 skip() { skip=$((skip + 1)); echo "skip - $1"; }
 contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
-model_ids() { python3 -c 'import json,sys; print("\n".join(m["id"] for m in json.load(sys.stdin).get("data", []) if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]))'; }
+model_ids() { python3 -c 'import json,sys; print("\n".join(o["model"] for o in json.load(sys.stdin).get("modelPicker", {}).get("options", []) if isinstance(o, dict) and isinstance(o.get("model"), str) and o["model"]))'; }
 message_body() { python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 512, "messages": [{"role": "user", "content": "Reply with exactly the word PONG and nothing else."}]}))' "$1"; }
 has_text_response() { python3 -c 'import json,sys; j=json.load(sys.stdin); sys.exit(0 if any(isinstance(b,dict) and b.get("type")=="text" and isinstance(b.get("text"),str) and b["text"].strip() for b in j.get("content",[])) else 1)'; }
 
@@ -52,11 +52,11 @@ COPILOT_SHIM_KEY=e2e-disc python3 -c "$shim_py" serve 0 "$pf" >"$TMP/disc.log" 2
 dpid=$!
 port=""
 for _ in $(seq 1 50); do read -r _ port 2>/dev/null < "$pf"; [ -n "$port" ] && break; sleep 0.1; done
-avail=$(curl -sf -m 30 -H "x-api-key: e2e-disc" "http://127.0.0.1:$port/v1/models" 2>/dev/null)
+avail=$(curl -sf -m 30 -H "x-api-key: e2e-disc" "http://127.0.0.1:$port/claude-settings" 2>/dev/null)
 if [ -z "$avail" ]; then bad "shim lists models from real Copilot" "$(cat "$TMP/disc.log")"; echo "$pass passed, $fail failed"; exit 1; fi
 # Keep the discovery shim running for the optional all-model probes below.
 ok "shim lists models from real Copilot"
-has_model() { contains "$avail" "\"id\": \"$1\"" || contains "$avail" "\"id\":\"$1\""; }
+has_model() { contains "$avail" "\"model\": \"$1\"" || contains "$avail" "\"model\":\"$1\""; }
 
 before=$(shims)
 

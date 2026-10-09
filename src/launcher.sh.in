@@ -165,6 +165,53 @@ _cc_shim_ok() {
   [ "$(printf 'header = "x-api-key: %s"\n' "$2" | curl -s -m 3 -K - -o /dev/null -w '%{http_code}' "http://127.0.0.1:$1/nope" 2>/dev/null)" = 404 ]
 }
 
+_cc_picker_ready() {
+  python3 -c 'import json, os, stat, sys
+try:
+    if os.path.islink(sys.argv[1]): raise ValueError("cache is a symlink")
+    if not stat.S_ISREG(os.stat(sys.argv[1]).st_mode): raise ValueError("cache is not a regular file")
+    with open(sys.argv[1]) as f: s = json.load(f)
+    picker = s.get("modelPicker") if isinstance(s, dict) else None
+    options = picker.get("options") if isinstance(picker, dict) else None
+    if not isinstance(options, list) or not options or not all(
+        isinstance(o, dict) and isinstance(o.get("model"), str) and o["model"]
+        and isinstance(o.get("label"), str) for o in options):
+        raise ValueError("cache does not contain a complete model picker")
+except FileNotFoundError:
+    sys.exit(1)
+except (OSError, ValueError) as e:
+    print("claude-copilot: invalid model picker cache: %s" % e, file=sys.stderr)
+    sys.exit(1)' "$1"
+}
+
+_cc_refresh_picker() {
+  local d="$1" port="$2" key="$3" timeout="$4"
+  (
+    local tmp
+    if [ -L "$d/model-picker.json" ]; then
+      echo "claude-copilot: model picker refresh refused: cache is a symlink" >&2
+      exit 1
+    fi
+    tmp=$(umask 077; mktemp "$d/model-picker.XXXXXX") || exit 1
+    trap 'rm -f "$tmp"' EXIT
+    if ! printf 'header = "x-api-key: %s"\n' "$key" |
+      curl -sf --connect-timeout 0.5 -m "$timeout" -K - "http://127.0.0.1:$port/claude-settings" -o "$tmp"; then
+      echo "claude-copilot: model picker refresh failed; keeping cached models" >&2
+      exit 1
+    fi
+    _cc_picker_ready "$tmp" || exit 1
+    python3 -c 'import json, os, sys
+with open(sys.argv[1]) as f: s = json.load(f)
+with open(sys.argv[1], "w") as f: json.dump({"modelPicker": s["modelPicker"]}, f)
+os.replace(sys.argv[1], sys.argv[2])' "$tmp" "$d/model-picker.json"
+  )
+}
+
+# Warm launches use the last complete catalog while the next snapshot is fetched.
+_cc_start_picker_refresh() {
+  ( trap '' HUP INT; _cc_refresh_picker "$1" "$2" "$3" 35 ) </dev/null >>"$4" 2>&1 &
+}
+
 _cc_fail() {
   [ -n "$_cc_update_state" ] && rm -f "$_cc_update_state"
   _cc_lock_drop
@@ -326,6 +373,12 @@ PY
 
 claude-copilot() {
   unset _cc_sig
+  case "${1:-}" in
+    --version|-v|-V)
+      printf 'claude-copilot %s\n' "$_cc_version"
+      return 0
+      ;;
+  esac
   _cc_check || return 1
   local sdir="$HOME/.local/share/claude-copilot"
   if [ -n "${COPILOT_STATE_DIR:-}" ] && [ "$COPILOT_STATE_DIR" != "$sdir" ]; then
@@ -495,20 +548,28 @@ __CLAUDE_COPILOT_SHIM__
   _cc_lock_drop
 
   # 3) claude, with env scoped to this one command (shell env stays clean).
-  # Feed every model Copilot offers into the /model picker (modelPicker setting, user scope).
+  # Load the picker from disk and always pass connection settings, even on the first launch.
   ms=""
   if [ "$wrap" = 0 ]; then
-    ms=$(printf 'header = "x-api-key: %s"\n' "$key" | curl -sf -m 20 -K - "http://127.0.0.1:$sport/claude-settings")
-  fi
-  case "$ms" in
-    "{"*)
+      if ! _cc_picker_ready "$sdir/model-picker.json"; then
+        echo "claude-copilot: fetching the required model list (5s timeout)" >&2
+        if ! _cc_refresh_picker "$sdir" "$sport" "$key" 5; then
+          echo "claude-copilot: complete model list unavailable; Claude was not started. Retry when Copilot is reachable." >&2
+          _cc_release "$sdir"
+          _cc_fail; return
+        fi
+      fi
       ms=$(CC_SETTINGS_DIR="$sdir" CC_SETTINGS_BASE="http://127.0.0.1:$sport" CC_SETTINGS_KEY="$key" \
         CC_SETTINGS_MODEL="$model" \
         CC_SETTINGS_SONNET="${COPILOT_SONNET_MODEL:-claude-sonnet-5.5}" \
         CC_SETTINGS_OPUS="${COPILOT_OPUS_MODEL:-claude-opus-5.5}" \
         CC_SETTINGS_FABLE="${COPILOT_FABLE_MODEL:-claude-opus-5.5}" \
         CC_SETTINGS_HAIKU="${COPILOT_HAIKU_MODEL:-claude-haiku-4.5}" \
-        python3 -c 'import hashlib, json, os, sys; s=json.load(sys.stdin); e=s.setdefault("env", {}); e.update({
+        python3 -c 'import hashlib, json, os, sys, tempfile
+cache = os.path.join(os.environ["CC_SETTINGS_DIR"], "model-picker.json")
+with open(cache) as f: cached = json.load(f)
+s = {"modelPicker": cached["modelPicker"]}
+e=s.setdefault("env", {}); e.update({
           "ANTHROPIC_BASE_URL": os.environ["CC_SETTINGS_BASE"], "ANTHROPIC_AUTH_TOKEN": os.environ["CC_SETTINGS_KEY"],
           "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ["CC_SETTINGS_SONNET"], "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ["CC_SETTINGS_OPUS"],
           "ANTHROPIC_DEFAULT_FABLE_MODEL": os.environ["CC_SETTINGS_FABLE"], "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ["CC_SETTINGS_HAIKU"],
@@ -518,11 +579,16 @@ if os.environ["CC_SETTINGS_MODEL"]: e["ANTHROPIC_MODEL"] = os.environ["CC_SETTIN
 else: e.pop("ANTHROPIC_MODEL", None)
 d=json.dumps(s, separators=(",", ":"))
 p=os.path.join(os.environ["CC_SETTINGS_DIR"], "settings-" + hashlib.sha256(d.encode()).hexdigest()[:16] + ".json")
-fd=os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, d.encode()); os.close(fd); os.replace(p + ".tmp", p); print(p)' <<<"$ms") || ms=""
+fd, tmp = tempfile.mkstemp(prefix="settings-", suffix=".tmp", dir=os.environ["CC_SETTINGS_DIR"])
+with os.fdopen(fd, "w") as f: f.write(d)
+os.replace(tmp, p); print(p)') || {
+        echo "claude-copilot: could not write complete session settings; Claude was not started" >&2
+        _cc_release "$sdir"
+        _cc_fail; return
+      }
       [ -n "$ms" ] && sa=(--settings "$ms")
-      find "$sdir" -maxdepth 1 -name 'settings-*.json' -mtime +7 ! -path "$ms" -exec rm -f {} + 2>/dev/null
-      ;;
-  esac
+      _cc_start_picker_refresh "$sdir" "$sport" "$key" "$log"
+  fi
   # INT is a no-op here (claude resets it to default) so claude's exit code survives ctrl-c.
   trap : INT
   ANTHROPIC_BASE_URL="http://127.0.0.1:$sport" \
@@ -542,6 +608,9 @@ fd=os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(f
 
   # 4) release this client; the last client stops the shared shim.
   _cc_release "$sdir"
+  if [ "$wrap" = 0 ]; then
+    ( find "$sdir" -maxdepth 1 -name 'settings-*.json' -mtime +7 ! -path "$ms" -exec rm -f {} + 2>/dev/null ) </dev/null >>"$log" 2>&1 &
+  fi
   [ "$wrap" = 0 ] && _cc_start_legacy_cleanup "$sdir" "$script" "$_cc_previous_version" "$log"
   _cc_schedule_update "$script" "$_cc_update_state"
   _cc_update_state=""

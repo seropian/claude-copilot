@@ -657,6 +657,9 @@ class LocalServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("--version", "-V"):
+        print("claude-copilot-shim %s" % (os.environ.get("COPILOT_SHIM_VERSION") or "unknown"))
+        return 0
     if not argv:
         return 2
     if argv[0] == "login":
