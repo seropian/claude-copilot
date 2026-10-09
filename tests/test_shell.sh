@@ -668,13 +668,17 @@ case "\$*" in
         ;;
       fail) exit 22 ;;
       empty) echo '{}' > "\$output" ;;
-      *) echo '{"modelPicker":{"options":[{"model":"test-model","label":"Test model"}]}}' > "\$output" ;;
+      *)
+        echo '{"modelPicker":{"options":[{"model":"test-model","label":"Test model"}]}}' > "\$output"
+        : > "$CW/picker.done"
+        ;;
     esac
     ;;
   *) exec "$CURL" "\$@" ;;
 esac
 FAKE
 chmod +x "$CW/bin/curl"
+rm -f "$CW/picker.done"
 cw_run /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1
 sfile=$(sed -n '/^--settings$/{n;p;}' "$CW/claude.args")
 [ -f "$sfile" ]; check "--settings is a file path" $? "$(cat "$CW/claude.args")"
@@ -686,7 +690,7 @@ grep -q "$key" "$sfile"; check "settings file carries the shim key" $?
 # Cached model discovery never waits for the live model catalog.
 PICKER="$CW/home/.local/share/claude-copilot/model-picker.json"
 for i in $(seq 1 50); do
-  grep -q 'test-model' "$PICKER" 2>/dev/null && break
+  [ -e "$CW/picker.done" ] && break
   sleep 0.1
 done
 printf '%s\n' '{"modelPicker":{"options":[{"model":"cached-model","label":"Cached model"},{"model":"another-model","label":"Another model"}]},"env":{"ANTHROPIC_BASE_URL":"http://wrong","UNTRUSTED_CACHE_ENV":"bad"}}' > "$PICKER"
