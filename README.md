@@ -72,9 +72,11 @@ claude-copilot                 # interactive
 claude-copilot -p "prompt"     # one-shot
 claude-copilot -c              # resume last session
 COPILOT_CLAUDE_MODEL=claude-opus-5.5 claude-copilot  # optional explicit override (otherwise use /model)
+claude-copilot --stop-shim       # stop the shared shim
+claude-copilot --restart-shim    # replace it, then start Claude Code
 ```
 
-All args go straight to `claude`. Exit code is passed through. If `COPILOT_CLAUDE_MODEL` is unset, Claude Code uses the model saved by `/model` (or its own default on the first run).
+All args go straight to `claude`, except the two shim-management options. Exit code is passed through. If `COPILOT_CLAUDE_MODEL` is unset, Claude Code uses the model saved by `/model` (or its own default on the first run).
 
 ## How it works
 
@@ -100,7 +102,7 @@ One small Python server (bundled into the script) sits between Claude Code and C
         - A rejected `adaptive` (claude-haiku-4.5) is passed through untouched, Claude Code retries without thinking by itself.
     - `/v1/messages/count_tokens` is forwarded to Copilot for models on its native endpoint, which returns a real count. Other models, or any failure, get a rough estimate (request size in bytes / 4).
 - Model aliases (sonnet/opus/haiku/fable) are mapped to Copilot model IDs, since Anthropic's IDs don't exist on Copilot.
-- At startup the script asks the shim for the model list (chat models Copilot marks `model_picker_enabled`, so no embeddings, internal models, or the old gpt-3*/gpt-4* families) and passes it to `claude --settings` as a `modelPicker` list, so `/model` shows all of them. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
+- At startup the script asks the shim for the model list (chat models Copilot marks `model_picker_enabled`; embeddings and other non-chat or hidden models are excluded) and passes it to `claude --settings` as a `modelPicker` list, so `/model` shows selectable chat models. Preview models are labeled `(Preview)`. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
 
 Lifecycle:
 
@@ -108,9 +110,15 @@ Lifecycle:
 2. Unless `COPILOT_AUTO_UPDATE=0`, start a background GitHub Releases check for a newer launcher. Network, parsing, checksum, and download errors are ignored and never delay startup. The script and its SHA-256 come from the same release over HTTPS, so the checksum only catches a corrupted download; it doesn't protect against a compromised release. If that matters to you, set `COPILOT_AUTO_UPDATE=0` and rerun the installer to update. However it got updated, the next launch prints `claude-copilot: updated X -> Y` once (the last version that ran is kept in `last-version` in the state dir).
 3. Start the shim. Bails if its port is taken.
 4. Run `claude`.
-5. The shim is left running on purpose, so backgrounded or resumed sessions don't hit "connection refused". Later runs reuse it; if it died, they restart it on the same port with the same key so old sessions reconnect. Unless `COPILOT_AUTO_UPDATE=0`, on a normal exit a helper waits for the launcher to stop and atomically replaces it with the verified download. HUP/TERM/INT during startup clean up the half-started shim.
+5. The shim is shared while Claude Code instances are running. Each launcher holds a short-lived lease; the last launcher to exit lets the shim's idle watcher clean it up after `COPILOT_SHIM_IDLE_GRACE` seconds. Later runs reuse a healthy shim, including across launcher updates, so active streams are not interrupted. HUP/TERM/INT during startup clean up the half-started shim.
 
-Run as many instances in parallel as you like, they share one shim (state in `~/.local/share/claude-copilot/shim.state`, override with `COPILOT_STATE_DIR`). Stop it with `claude-copilot --stop-shim`.
+Run as many instances in parallel as you like; all launchers for the same home share one per-user shim, coordinated through `~/.local/share/claude-copilot/shim.state` and its startup lock. Custom `COPILOT_STATE_DIR` values are rejected. A conflicting `COPILOT_SHIM_PORT` fails instead of starting another shim; stop the existing shim first to change ports. An unhealthy recorded process also blocks replacement while its PID is alive. Stop the shared shim with `claude-copilot --stop-shim`; use `claude-copilot --restart-shim` after a build. Set `COPILOT_SHIM_IDLE_GRACE=0` to keep the shim running indefinitely. Shims started by older versions with custom state directories must be stopped separately before upgrading.
+
+The shim exposes authenticated internal status and retire endpoints for launcher coordination. A version change requests retirement instead of killing a healthy shim, so in-flight work can finish before the next replacement.
+
+Wrapped Claude `--bg-spare` workers and their spare PTY hosts are supervised separately. After the idle grace period, the wrapper stops its own worker tree only when no ordinary launcher lease, no active session reported by `claude agents --json`, and no in-flight shim request remain. Any Claude session, including an unrelated one, delays this cleanup. Registry or status errors also defer cleanup and are reported on stderr. This supervision still works if the shim has already stopped; `COPILOT_SHIM_IDLE_GRACE=0` disables it.
+
+After a normal session exits following an update, the launcher checks in the background for verified idle workers and an old shared shim. This cleanup never delays startup: its process scan, `claude agents --json` registry check, and shim status checks run without the startup lock (`shim.lock`). Only the final shim stop takes that lock, without waiting; if a launcher is starting, cleanup is skipped and retried after a later session. Under the lock it rechecks the recorded shim state, client leases, process identity, and idle status, sends SIGTERM, and removes `shim.state` so the next launcher starts a fresh shim instead of reusing the stopping one. It waits for the old shim to exit only after releasing the lock. One cleanup runs at a time (`legacy-cleanup.lock`); deferrals and results are written to `~/.local/share/claude-copilot/claude-copilot.log`, and the retry marker advances only after a successful pass. It stops only same-user orphan wrapper trees with the exact legacy launcher arguments and a trusted Claude executable, and only when the session registry is empty and no other client leases remain. Leases belonging to those verified trees are excluded only while their PID and process start token still match. An existing shared shim must also report authenticated idle status; missing or unsupported status, ambiguous ownership, or an unknown custom state leaves those processes alone and retries after a later session. If no shared shim state exists, verified idle orphan wrappers can still be cleaned up, without stopping any unrecorded shim. Cleanup is limited to the current launcher and shared state directory; it does not scan arbitrary custom paths or unrelated processes.
 
 ## Config
 
@@ -124,8 +132,9 @@ All env vars, all optional.
 | `COPILOT_FABLE_MODEL` | `claude-opus-5.5` | `fable` alias target. Copilot has no Fable model, so picking it really gives you whatever this points to |
 | `COPILOT_HAIKU_MODEL` | `claude-haiku-4.5` | `haiku` alias target |
 | `COPILOT_AUTO_UPDATE` | on | set to `0` to turn off the background update check and the exit-time self-update; rerun the installer to update by hand |
-| `COPILOT_SHIM_PORT` | unset (free port) | pin the shim to a fixed port (starts a separate shim if the running one uses another port) |
-| `COPILOT_STATE_DIR` | `~/.local/share/claude-copilot` | where the shim state file, lock and settings files live |
+| `COPILOT_SHIM_PORT` | unset (free port) | choose the shared shim's port on startup; must match an already-running shim |
+| `COPILOT_SHIM_IDLE_GRACE` | `30` seconds | time without leases or in-flight requests before the shim exits; `0` disables idle cleanup |
+| `COPILOT_STATE_DIR` | `~/.local/share/claude-copilot` | legacy setting; custom paths are rejected, unset it to use the shared state directory |
 | `COPILOT_EDITOR_VERSION` | `1.104.3` | VS Code version sent to Copilot in request headers |
 | `COPILOT_PLUGIN_VERSION` | `0.26.7` | Copilot Chat version sent to Copilot in request headers |
 | `COPILOT_TOKEN_FILE` | `~/.local/share/claude-copilot/github_token` | where the GitHub token is stored |
@@ -147,13 +156,14 @@ Files:
 
 **Last checked 2026-10-02 with Claude Code 2.1.286, results may be stale.** Each model got a plain "reply ok" check and a Bash tool-call check, streaming, through the shim. Images were checked on one model per route (claude-sonnet-5.5, gpt-5.5, gemini-3.7-flash).
 
-- **Work (all 24 in the picker):** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-4.5, gemini-3.7-flash, gemini-3.8-flash, gpt-5.3-codex, gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-5-mini, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, kimi-k2.7-code, kimi-k3, mai-code-1.1-flash
-- **Hidden from the picker** (Copilot doesn't mark them for the model picker, you can still pass them with `COPILOT_CLAUDE_MODEL`, they go through `/chat/completions`):
+- **Work (models tested on 2026-10-02):** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-4.5, gemini-3.7-flash, gemini-3.8-flash, gpt-5.3-codex, gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-5-mini, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, kimi-k2.7-code, kimi-k3, mai-code-1.1-flash
+- **Legacy or untested chat models:** these appear in the picker only when Copilot includes them in `/models` and marks them `model_picker_enabled`; they go through `/chat/completions`:
     - gpt-4, gpt-4-0613, gpt-4-0125-preview: work (checked 2026-10-02)
     - gpt-4o*, gpt-4.1*, gpt-3.5-turbo*, gpt-4-o-preview: untested. Every call got 429 "exceeded your rate limit for utility models" (account-level limit after a burst of test requests)
     - gpt-41-copilot: 400 model_not_supported
+    - Availability depends on the models returned for your Copilot plan, and even picker models can be rate-limited or unsupported; the list reflects the API catalog, not a guarantee that every model accepts requests.
 
-Not tested: `auto`. The model list depends on your Copilot plan.
+Not tested: `auto`.
 
 ## Known issues / limits
 
@@ -171,7 +181,8 @@ Not tested: `auto`. The model list depends on your Copilot plan.
 ## Troubleshooting
 
 - **Port busy:** you set `COPILOT_SHIM_PORT` and something other than the shim holds it. Unset it to get a free port.
-- **Stopping the shim:** `claude-copilot --stop-shim`. The next run starts a fresh one.
+- **Changing the shim port:** stop the shared shim first with `claude-copilot --stop-shim`, then start a new session with the desired `COPILOT_SHIM_PORT`.
+- **Stopping or restarting the shim:** use `claude-copilot --stop-shim` or `claude-copilot --restart-shim`. Restarting starts Claude Code after the replacement is ready.
 - **"GitHub refused the Copilot token request":** the stored login is bad or the account has no Copilot access. Delete `~/.local/share/claude-copilot/github_token` and rerun.
 - **Background agent says it is not logged in:** run `claude-copilot` once from an interactive terminal so the GitHub device login is stored. The launcher reuses that stored login and puts the shim URL/key in the session settings for background agents; it does not ask you to log in again.
 - **503 "model list unavailable":** the shim couldn't fetch Copilot's `/models`. It retries after about 30s.

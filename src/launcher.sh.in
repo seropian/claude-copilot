@@ -23,23 +23,97 @@ _cc_check() {
   fi
 }
 
-# args: shim pid, port file. Kills our shim and removes the files.
+# Return a stable process-start token. This prevents a reused pid from owning an old lease.
+_cc_start_token() {
+  ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ *//;s/ *$//'
+}
+
+# Remove dead or pid-reused client leases. Call while holding shim.lock.
+_cc_lease_reap() {
+  local d="$1" f p want got
+  [ -d "$d" ] || return 0
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue
+    p="${f##*/}"
+    case "$p" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
+    want=$(cat "$f" 2>/dev/null) || want=""
+    got=$(_cc_start_token "$p")
+    kill -0 "$p" 2>/dev/null || got=""
+    [ -n "$want" ] && [ "$want" = "$got" ] || rm -f "$f"
+  done
+}
+
+_cc_lease_add() {
+  local d="$1" p="$$" token spare="${2:-0}"
+  token=$(_cc_start_token "$p")
+  [ -n "$token" ] || return 1
+  if [ "$spare" = 1 ]; then
+    ( umask 077; mkdir -p "$d/../spares" && printf '%s\n' "$token" > "$d/../spares/$p" ) || return 1
+  fi
+  ( umask 077; mkdir -p "$d" && printf '%s\n' "$token" > "$d/$p.tmp" && mv -f "$d/$p.tmp" "$d/$p" )
+  _cc_lease_file="$d/$p"
+}
+
+_cc_lease_release() {
+  if [ -n "${_cc_lease_file:-}" ]; then
+    rm -f "$_cc_lease_file" "${_cc_lease_file%/*}/../spares/${_cc_lease_file##*/}"
+  fi
+  _cc_lease_file=""
+}
+
+_cc_lease_any() {
+  local d="$1" f
+  [ -d "$d" ] || return 1
+  for f in "$d"/*; do [ -f "$f" ] && return 0; done
+  return 1
+}
+
+# Release this launcher and stop an unowned shim. Call after the shim has started.
+_cc_release() {
+  local d="$1" f p oport okey
+  [ -n "${_cc_lease_file:-}" ] || return 0
+  local took=0
+  if [ "${_cc_lock:-}" != "$d/shim.lock" ]; then
+    _cc_lock_take "$d/shim.lock" || return 0
+    took=1
+  fi
+  # Leave an unleased shim alive for the idle grace period. This avoids
+  # restarting it when a session is briefly detached or relaunched.
+  _cc_lease_release
+  _cc_lease_reap "$d/leases"
+  [ "$took" = 1 ] && _cc_lock_drop
+}
+
+# args: shim pid, port file. Kills our half-started shim and releases our lease.
 # No pid yet (we were interrupted before the shim wrote its port file)? Use the early pid file.
 _cc_cleanup() {
   local p="$1"
   [ -z "$p" ] && [ -n "$2" ] && [ -f "$2.pid" ] && p=$(cat "$2.pid" 2>/dev/null)
   case "$p" in ''|*[!0-9]*) ;; *) kill "$p" 2>/dev/null ;; esac
   [ -n "$2" ] && rm -f "$2" "$2.pid" "$2.tmp"
+  _cc_release "${_cc_state_dir:-${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}}"
   _cc_lock_drop
   return 0
 }
 
 # mkdir lock so concurrent launchers never start two shims. Stale if its owner pid is dead.
 _cc_lock=""
+_cc_lock_ownerless() {
+  python3 -c 'import os, sys, time
+try:
+    old = time.time() - os.stat(sys.argv[1]).st_mtime >= 5
+    if old: os.rmdir(sys.argv[1])
+except (FileNotFoundError, OSError):
+    pass' "$1"
+}
 _cc_lock_take() {
   local d="$1" i p
   for i in $(seq 1 200); do
-    if mkdir "$d" 2>/dev/null; then echo $$ > "$d/pid"; _cc_lock="$d"; return 0; fi
+    if mkdir "$d" 2>/dev/null; then
+      if echo $$ > "$d/pid"; then _cc_lock="$d"; return 0; fi
+      rmdir "$d" 2>/dev/null
+      return 1
+    fi
     _cc_lock_break "$d"
     sleep 0.1
   done
@@ -51,12 +125,12 @@ _cc_lock_break() {
   local d="$1" b="$1.break" p
   if ! mkdir "$b" 2>/dev/null; then
     p=$(cat "$b/pid" 2>/dev/null)
-    case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null || rm -rf "$b" ;; esac
+    case "$p" in '') _cc_lock_ownerless "$b" ;; *[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null || rm -rf "$b" ;; esac
     return 0
   fi
   echo $$ > "$b/pid"
   p=$(cat "$d/pid" 2>/dev/null)
-  case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null || rm -rf "$d" ;; esac
+  case "$p" in '') _cc_lock_ownerless "$d" ;; *[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null || rm -rf "$d" ;; esac
   rm -rf "$b"
 }
 _cc_lock_drop() {
@@ -75,7 +149,11 @@ _cc_run() {
     [ -n "$model" ] && cmd+=(--model "$model")
     cmd+=(${sa[@]+"${sa[@]}"} "$@")
   fi
-  "${env_args[@]}" "${cmd[@]}"
+  if [ "$spare" = 1 ]; then
+    "${env_args[@]}" python3 -c "$shim" spare "$sdir" "${cmd[@]}"
+  else
+    "${env_args[@]}" "${cmd[@]}"
+  fi
 }
 
 _cc_port_busy() {
@@ -97,12 +175,58 @@ _cc_fail() {
 # arg: file holding the last version that ran. Says so once when the version changed since then.
 _cc_announce_update() {
   local f="$1" old=""
-  [ -L "$f" ] && return 0
+  if [ -L "$f" ]; then _cc_previous_version="unknown"; return 0; fi
   [ -f "$f" ] && read -r old < "$f" 2>/dev/null
+  _cc_previous_version="$old"
   [ "$old" = "$_cc_version" ] && return 0
   [ -n "$old" ] && echo "claude-copilot: updated $old -> $_cc_version" >&2
   ( umask 077; printf '%s\n' "$_cc_version" > "$f.tmp" && mv -f "$f.tmp" "$f" ) 2>/dev/null
   return 0
+}
+
+# args: state dir, shim state version, previous launcher version. True when legacy cleanup has nothing to do.
+_cc_legacy_cleanup_current() {
+  local marker="$1/legacy-cleanup-version" old=""
+  [ -L "$marker" ] && return 1
+  [ -f "$marker" ] && read -r old < "$marker" 2>/dev/null
+  [ "$old" = "$_cc_version" ] && [ "$2" = "$_cc_version" ] && { [ -z "$3" ] || [ "$3" = "$_cc_version" ]; }
+}
+
+_cc_legacy_cleanup() {
+  local d="$1" script="$2" state_version="$3" previous="$4"
+  local marker="$1/legacy-cleanup-version"
+  _cc_legacy_cleanup_deferred=0
+  if [ -L "$marker" ]; then
+    echo "claude-copilot: legacy cleanup deferred: cleanup marker is a symlink" >&2
+    _cc_legacy_cleanup_deferred=1
+    return 1
+  fi
+  _cc_legacy_cleanup_current "$d" "$state_version" "$previous" && return 0
+  if [ -z "$previous" ] && [ ! -e "$marker" ] &&
+    { [ -z "$state_version" ] || [ "$state_version" = "$_cc_version" ]; }; then
+    ( umask 077; printf '%s\n' "$_cc_version" > "$marker.tmp" && mv -f "$marker.tmp" "$marker" ) 2>/dev/null
+    return 0
+  fi
+  if python3 -c "$shim" cleanup "$d" "$script" "$_cc_version"; then
+    ( umask 077; printf '%s\n' "$_cc_version" > "$marker.tmp" && mv -f "$marker.tmp" "$marker" ) 2>/dev/null || {
+      echo "claude-copilot: legacy cleanup completed but its retry marker could not be saved" >&2
+      _cc_legacy_cleanup_deferred=1
+      return 1
+    }
+    return 0
+  fi
+  _cc_legacy_cleanup_deferred=1
+  return 1
+}
+
+# Legacy cleanup runs in the background after a session exits, so it never delays startup.
+# Its slow checks run without shim.lock; only the final shim stop takes that lock, without waiting.
+_cc_start_legacy_cleanup() {
+  local d="$1" script="$2" previous="$3" log="$4" over=""
+  [ -f "$d/shim.state" ] && [ ! -L "$d/shim.state" ] && read -r _ _ _ over < "$d/shim.state" 2>/dev/null
+  _cc_legacy_cleanup_current "$d" "$over" "$previous" && return 0
+  [ -L "$log" ] && return 0
+  ( trap '' HUP INT; _cc_legacy_cleanup "$d" "$script" "$over" "$previous" || :; ) </dev/null >>"$log" 2>&1 &
 }
 
 _cc_check_update() {
@@ -203,28 +327,71 @@ PY
 claude-copilot() {
   unset _cc_sig
   _cc_check || return 1
-  if [ "${1:-}" = --stop-shim ]; then
-    local _f="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}/shim.state" _p="" _o="" _k=""
-    [ -f "$_f" ] && read -r _p _o _k _ < "$_f"
-    case "$_p" in ''|*[!0-9]*) echo "claude-copilot: no shim running"; return 0 ;; esac
-    # only kill if the port still answers as our shim (pid may be reused)
-    case "$_o" in ''|*[!0-9]*) ;; *) _cc_shim_ok "$_o" "$_k" && kill "$_p" 2>/dev/null ;; esac
-    rm -f "$_f"; echo "claude-copilot: shim stopped"; return 0
+  local sdir="$HOME/.local/share/claude-copilot"
+  if [ -n "${COPILOT_STATE_DIR:-}" ] && [ "$COPILOT_STATE_DIR" != "$sdir" ]; then
+    echo "claude-copilot: COPILOT_STATE_DIR overrides are not supported; one shared shim uses $sdir. Unset COPILOT_STATE_DIR." >&2
+    return 1
   fi
+  local _restart=0
+  case "${1:-}" in
+    --stop-shim|--restart-shim)
+      [ "$1" = --restart-shim ] && _restart=1
+      local _f="$sdir/shim.state" _p="" _o="" _k="" _i
+      ( umask 077; mkdir -p "$sdir" ) || return 1
+      _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for shim lock" >&2; return 1; }
+      [ -f "$_f" ] && read -r _p _o _k _ < "$_f"
+      case "$_p" in ''|*[!0-9]*) ;; *)
+        # only kill if the port still answers as our shim (pid may be reused)
+        case "$_o" in ''|*[!0-9]*) ;; *)
+          if _cc_shim_ok "$_o" "$_k"; then
+            kill "$_p" 2>/dev/null
+            for _i in $(seq 1 50); do
+              _cc_port_busy "$_o" || break
+              sleep 0.1
+            done
+            if _cc_port_busy "$_o"; then
+              echo "claude-copilot: shim did not stop; keeping its state" >&2
+              _cc_lock_drop
+              return 1
+            fi
+          elif kill -0 "$_p" 2>/dev/null; then
+            echo "claude-copilot: recorded shim PID $_p is still alive but cannot be authenticated; keeping its state" >&2
+            _cc_lock_drop
+            return 1
+          fi
+          ;;
+        esac
+        ;;
+      esac
+      rm -f "$_f"
+      rm -rf "$sdir/leases"
+      _cc_lock_drop
+      [ "$_restart" = 0 ] && echo "claude-copilot: shim stopped" && return 0
+      shift
+      ;;
+  esac
   local sport="${COPILOT_SHIM_PORT:-0}"
   local model="${COPILOT_CLAUDE_MODEL:-}" # empty means use Claude Code's saved /model selection.
-  local sdir="${COPILOT_STATE_DIR:-$HOME/.local/share/claude-copilot}"
   local log="$sdir/claude-copilot.log"
   local spid="" pf="" i rc ms key
   local -a sa=()
-  local script="${BASH_SOURCE[0]:-$0}" wrap=0
+  local script="${BASH_SOURCE[0]:-$0}" wrap=0 spare=0 arg
+  local _cc_state_dir="$sdir" _cc_lease_file="" _cc_previous_version=""
   case "$script" in /*) ;; *) script="$PWD/${script#./}" ;; esac
   # CLAUDE_CODE_PROCESS_WRAPPER mode: claude spawns "<this script> <cmd> <args...>". Ensure the shim, then run cmd.
   # Claude Code passes the absolute path of its own binary first, and doesn't always forward our env, so detect by that.
   case "${1:-}" in /*) [ -f "$1" ] && [ -x "$1" ] && wrap=1 ;; esac
+  if [ "$wrap" = 1 ] && [ "${2:-}" = --bg-spare ]; then
+    spare=1
+  elif [ "$wrap" = 1 ] && [ "${2:-}" = --bg-pty-host ]; then
+    for arg in "$@"; do
+      [ "$arg" = --bg-spare ] && spare=1
+    done
+  fi
 
   [ "$wrap" = 1 ] || _cc_start_update_check "$script"
   # Shim source (python). Usage: login | serve <port, 0 = any free> <file to write "pid port" to>.
+  # The lease directory is shared with the shim so it can reap clients after hard launcher crashes.
   # login: GitHub device-code login, token kept in ~/.local/share/claude-copilot.
   # serve: local Anthropic-style API in front of GitHub Copilot, see README, "How it works".
   local shim='
@@ -251,21 +418,44 @@ __CLAUDE_COPILOT_SHIM__
   fi
   local sf opid="" oport="" okey="" over="" want="$sport" healthy=0
   sf="$sdir/shim.state"
+  _cc_lease_file=""
   [ "$wrap" = 1 ] || _cc_announce_update "$sdir/last-version"
   _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for $sdir/shim.lock (if no other claude-copilot is starting, rm -rf it)" >&2; _cc_fail; return; }
   [ -f "$sf" ] && [ ! -L "$sf" ] && read -r opid oport okey over < "$sf" 2>/dev/null
   case "$oport" in ''|*[!0-9]*) oport=""; okey="" ;; esac
+  _cc_lease_reap "$sdir/leases"
+  _cc_lease_reap "$sdir/spares"
   [ -n "$oport" ] && [ -n "$okey" ] && _cc_shim_ok "$oport" "$okey" && healthy=1
-  if [ "$healthy" = 1 ] && [ "$over" = "$_cc_version" ] && { [ "$want" = 0 ] || [ "$want" = "$oport" ]; }; then
+  if [ "$healthy" = 1 ] && [ "$want" != 0 ] && [ "$want" != "$oport" ]; then
+    echo "claude-copilot: shared shim already uses port $oport; unset COPILOT_SHIM_PORT or stop the shim before changing ports" >&2
+    _cc_fail; return
+  fi
+  if [ "$healthy" = 0 ]; then
+    case "$opid" in ''|*[!0-9]*) ;; *)
+      if kill -0 "$opid" 2>/dev/null; then
+        echo "claude-copilot: recorded shim PID $opid is still alive but unhealthy; refusing to start a second shim" >&2
+        _cc_fail; return
+      fi
+      ;;
+    esac
+  fi
+  # A healthy shim can outlive the launcher that started it. Reuse it across
+  # launcher versions so another client is never interrupted by an update.
+  if [ "$healthy" = 1 ] && [ "$over" != "$_cc_version" ]; then
+    if _cc_lease_any "$sdir/leases"; then
+      # Keep an active old shim alive; its existing clients may be streaming.
+      printf 'header = "x-api-key: %s"\n' "$okey" |
+        curl -sf -m 2 -X POST -K - "http://127.0.0.1:$oport/_shim/retire" >/dev/null 2>&1 || true
+    elif [ "$wrap" = 0 ]; then
+      echo "claude-copilot: keeping the older shim; legacy cleanup retries in the background after this session exits" >&2
+    else
+      echo "claude-copilot: keeping the older shim until a normal launch can verify it is idle" >&2
+    fi
+  fi
+  if [ "$healthy" = 1 ]; then
     sport="$oport"; key="$okey"
   else
     key=""
-    if [ "$healthy" = 1 ] && [ "$over" != "$_cc_version" ] && { [ "$want" = 0 ] || [ "$want" = "$oport" ]; }; then
-      # stale version: restart it on the same port and key so running sessions reconnect
-      key="$okey"
-      case "$opid" in ''|*[!0-9]*) ;; *) kill "$opid" 2>/dev/null ;; esac
-      for i in $(seq 1 30); do _cc_port_busy "$oport" || break; sleep 0.1; done
-    fi
     if [ "$want" = 0 ] && [ -n "$oport" ] && ! _cc_port_busy "$oport"; then
       want="$oport"; key="$okey"
     elif [ "$want" = 0 ] && [ -n "$oport" ]; then
@@ -276,7 +466,7 @@ __CLAUDE_COPILOT_SHIM__
     fi
     [ -n "$key" ] || key=$(python3 -c 'import secrets; print(secrets.token_hex(24))') || { _cc_fail; return; }
     pf=$(mktemp "$sdir/start.XXXXXX") || { _cc_fail; return; }
-    ( umask 077; COPILOT_SHIM_KEY="$key" nohup python3 -c "$shim" serve "$want" "$pf" >>"$log" 2>&1 & echo $! >"$pf.pid" )
+    ( umask 077; COPILOT_SHIM_KEY="$key" COPILOT_SHIM_VERSION="$_cc_version" COPILOT_SHIM_STATE_FILE="$sf" COPILOT_SHIM_LEASE_DIR="$sdir/leases" nohup python3 -c "$shim" serve "$want" "$pf" >>"$log" 2>&1 & echo $! >"$pf.pid" )
     sport=""
     for i in $(seq 1 100); do
       read -r spid sport < "$pf" 2>/dev/null
@@ -285,9 +475,9 @@ __CLAUDE_COPILOT_SHIM__
     done
     if [ -z "$sport" ]; then
       _cc_cleanup "$spid" "$pf"; spid=""; pf=""
-      # lost a startup race with another launcher? use the shim it started
+      # lost a startup race with another launcher? use only a current-version shim
       read -r opid oport okey over < "$sf" 2>/dev/null
-      if [ -n "$oport" ] && [ -n "$okey" ] && _cc_shim_ok "$oport" "$okey"; then
+      if [ "$over" = "$_cc_version" ] && [ -n "$oport" ] && [ -n "$okey" ] && _cc_shim_ok "$oport" "$okey"; then
         sport="$oport"; key="$okey"
       else
         echo "claude-copilot: shim didn't start, see $log" >&2
@@ -300,13 +490,16 @@ __CLAUDE_COPILOT_SHIM__
       spid=""; pf=""
     fi
   fi
+  _cc_lease_add "$sdir/leases" "$spare" || { echo "claude-copilot: could not register shim client" >&2; _cc_lock_drop; _cc_fail; return; }
 
   _cc_lock_drop
 
   # 3) claude, with env scoped to this one command (shell env stays clean).
   # Feed every model Copilot offers into the /model picker (modelPicker setting, user scope).
-  ms=$(printf 'header = "x-api-key: %s"\n' "$key" | curl -sf -m 20 -K - "http://127.0.0.1:$sport/claude-settings")
-  [ "$wrap" = 1 ] && ms=""
+  ms=""
+  if [ "$wrap" = 0 ]; then
+    ms=$(printf 'header = "x-api-key: %s"\n' "$key" | curl -sf -m 20 -K - "http://127.0.0.1:$sport/claude-settings")
+  fi
   case "$ms" in
     "{"*)
       ms=$(CC_SETTINGS_DIR="$sdir" CC_SETTINGS_BASE="http://127.0.0.1:$sport" CC_SETTINGS_KEY="$key" \
@@ -347,7 +540,9 @@ fd=os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(f
   _cc_run "$@"
   rc=$?
 
-  # 4) the shim stays up on purpose
+  # 4) release this client; the last client stops the shared shim.
+  _cc_release "$sdir"
+  [ "$wrap" = 0 ] && _cc_start_legacy_cleanup "$sdir" "$script" "$_cc_previous_version" "$log"
   _cc_schedule_update "$script" "$_cc_update_state"
   _cc_update_state=""
   trap - HUP TERM INT

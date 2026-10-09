@@ -40,8 +40,24 @@ class ModelCatalog:
         return []
 
     def picker_models(self):
-        return [{"type": "model", "id": m["id"], "display_name": m.get("name") or m["id"]} for m in self.models()
-                if m.get("model_picker_enabled") and (m.get("capabilities") or {}).get("type") == "chat"]
+        result = []
+        seen = set()
+        for m in self.models():
+            if not isinstance(m, dict):
+                continue
+            capabilities = m.get("capabilities")
+            if (not isinstance(capabilities, dict) or capabilities.get("type") != "chat"
+                    or m.get("model_picker_enabled") is not True):
+                continue
+            model_id = m.get("id")
+            if not isinstance(model_id, str) or not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            name = m.get("name")
+            display_name = (name if isinstance(name, str) and name else model_id) + (
+                " (Preview)" if m.get("preview") is True else "")
+            result.append({"type": "model", "id": model_id, "display_name": display_name})
+        return result
 
 
 CATALOG = ModelCatalog(CLIENT)
