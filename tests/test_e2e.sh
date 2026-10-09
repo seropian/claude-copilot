@@ -4,8 +4,7 @@
 # Skips (exit 0) when either is missing. Spends a few small Copilot requests per model.
 # Run: bash tests/test_e2e.sh
 # Models per route (override as needed): E2E_NATIVE, E2E_RESPONSES, E2E_CHAT. Missing ones are skipped.
-# E2E_ALL_MODELS=1 tests each chat model exposed by the shim with a 512-token cap.
-# Run with E2E=1 E2E_ALL_MODELS=1 bash tests/run.sh; sends one extra request per model.
+# E2E_ALL_MODELS=1 tests each model returned by /models with a 512-token cap; run with E2E=1 E2E_ALL_MODELS=1 bash tests/run.sh.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/dist/claude-copilot.sh"
@@ -18,6 +17,10 @@ ok()   { pass=$((pass + 1)); echo "ok   - $1"; }
 bad()  { fail=$((fail + 1)); echo "FAIL - $1"; [ -n "${2:-}" ] && echo "       $2" | head -c 600; }
 skip() { skip=$((skip + 1)); echo "skip - $1"; }
 contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+model_ids() { python3 -c 'import json,sys; print("\n".join(m["id"] for m in json.load(sys.stdin).get("data", []) if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]))'; }
+message_body() { python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 512, "messages": [{"role": "user", "content": "Reply with exactly the word PONG and nothing else."}]}))' "$1"; }
+has_text_response() { python3 -c 'import json,sys; j=json.load(sys.stdin); sys.exit(0 if any(isinstance(b,dict) and b.get("type")=="text" and isinstance(b.get("text"),str) and b["text"].strip() for b in j.get("content",[])) else 1)'; }
+
 
 if ! command -v claude >/dev/null 2>&1; then echo "skip - e2e: claude not on PATH"; exit 0; fi
 if [ ! -s "$HOME/.local/share/claude-copilot/github_token" ]; then
@@ -77,18 +80,19 @@ done
 # ---------- every model exposed by the shim ----------
 
 if [ "${E2E_ALL_MODELS:-0}" = 1 ]; then
-  all_models=$(python3 -c 'import json,sys; print("\n".join(m["id"] for m in json.load(sys.stdin).get("data", []) if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]))' <<<"$avail")
+  all_models=$(model_ids <<<"$avail")
   if [ -z "$all_models" ]; then
     bad "all-model check: no models in shim catalog" "$avail"
   else
     while IFS= read -r model; do
       [ -n "$model" ] || continue
-      body=$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 512, "messages": [{"role": "user", "content": "Reply with exactly the word PONG and nothing else."}]}))' "$model")
+      body=$(message_body "$model")
+
       result=$(curl -sS -m 120 -w '\n%{http_code}' -H "x-api-key: e2e-disc" -H "content-type: application/json" -d "$body" "http://127.0.0.1:$port/v1/messages" 2>&1)
       curl_rc=$?
       status=${result##*$'\n'}
       response=${result%$'\n'*}
-      if [ $curl_rc -eq 0 ] && [ "$status" = 200 ] && python3 -c 'import json,sys; j=json.load(sys.stdin); sys.exit(0 if any(isinstance(b,dict) and b.get("type")=="text" and isinstance(b.get("text"),str) and b["text"].strip() for b in j.get("content",[])) else 1)' <<<"$response"; then
+      if [ $curl_rc -eq 0 ] && [ "$status" = 200 ] && has_text_response <<<"$response"; then
         ok "all-model check ($model): non-empty response"
       else
         bad "all-model check ($model): request failed (curl=$curl_rc http=$status)" "$response"

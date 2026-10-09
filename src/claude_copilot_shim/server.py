@@ -162,6 +162,11 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.reply(401, err("invalid api key")); return False
         return True
     def do_POST(self):
+        if self.path.split("?")[0] == "/_shim/retire":
+            if not self.allowed(): return
+            with self.server.lifecycle_lock:
+                self.server.draining = True
+            return self.reply(200, {"draining": True})
         if not self.allowed(): return
         try: n = int(self.headers.get("content-length") or 0)
         except ValueError: return self.reply(400, err("bad content-length"))
@@ -192,6 +197,11 @@ class CopilotRequestHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             log("shim: POST %s failed (%r)" % (p, e)); self.reply(500, err("shim error: %r" % e))
     def do_GET(self):
+        if self.path.split("?")[0] == "/_shim/status":
+            if not self.allowed(): return
+            with self.server.lifecycle_lock:
+                return self.reply(200, {"inflight": self.server.inflight, "draining": self.server.draining,
+                                        "version": self.server.version})
         if not self.allowed(): return
         try:
             path = self.path.split("?")[0]

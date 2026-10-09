@@ -54,9 +54,8 @@ class ModelCatalog:
                 continue
             seen.add(model_id)
             name = m.get("name")
-            display_name = name if isinstance(name, str) and name else model_id
-            if m.get("preview") is True:
-                display_name += " (Preview)"
+            display_name = (name if isinstance(name, str) and name else model_id) + (
+                " (Preview)" if m.get("preview") is True else "")
             result.append({"type": "model", "id": model_id, "display_name": display_name})
         return result
 

@@ -170,7 +170,7 @@ chmod +x "$FLOW/bin/claude"
 echo "fake-gh-token" > "$FLOW/token"
 
 run_flow() { # env assignments via "$@" prefix, returns launcher rc
-  env -i HOME="$FLOW" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" "$@" \
+  env -i HOME="${FLOW_HOME:-$FLOW}" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" "$@" \
     /bin/bash "$SCRIPT" --extra-flag value 2>"$FLOW/stderr"
 }
 
@@ -204,17 +204,45 @@ contains "$out" "--extra-flag value"; check "forwards user args to claude" $?
 port=$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")
 sleep 0.3
 code=$("$CURL" -s -m 2 -o /dev/null -w '%{http_code}' -H "x-api-key: $(sed -n 's/^TOKEN=//p' "$FLOW/claude.out")" "http://127.0.0.1:$port/nope")
-[ "$code" = 404 ]; check "shim stays up after claude exits" $? "code=$code"
+[ "$code" = 404 ]; check "shim stays up during idle grace" $? "code=$code"
+[ -e "$FLOW/.local/share/claude-copilot/shim.state" ]; check "idle shim keeps state" $?
 
 run_flow; rc=$?
 [ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" = "$port" ] && [ "$(sed -n 's/^TOKEN=//p' "$FLOW/claude.out")" != "" ]
-check "next run reuses the running shim" $? "rc=$rc"
+check "next run reuses the shared shim" $? "rc=$rc"
 
-# shim killed behind our back: next run restarts it on the same port with the same key
-read -r kp _ < "$FLOW/.local/share/claude-copilot/shim.state"; kill "$kp"; sleep 0.5
+IDLE_STATE="$FLOW/idle-home/.local/share/claude-copilot"
+FLOW_HOME="$FLOW/idle-home" run_flow COPILOT_SHIM_IDLE_GRACE=1; idle_port=$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")
+sleep 4
+code=$($CURL -s -m 2 -o /dev/null -w '%{http_code}' -H "x-api-key: $(sed -n 's/^TOKEN=//p' "$FLOW/claude.out")" "http://127.0.0.1:$idle_port/nope")
+[ ! -e "$IDLE_STATE/shim.state" ]; check "shim stops after idle grace" $? "code=$code"
+[ ! -e "$IDLE_STATE/shim.state" ]; check "idle cleanup removes shim state" $?
+
 run_flow; rc=$?
-[ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" = "$port" ]; check "dead shim is restarted on the same port" $? "rc=$rc"
-[ "$(cat "$FLOW/shim.status")" = 404 ]; check "restarted shim accepts the old key" $?
+[ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" = "$port" ] && [ "$(sed -n 's/^TOKEN=//p' "$FLOW/claude.out")" != "" ]
+check "shared shim remains available after idle cleanup" $? "rc=$rc"
+
+# shim killed behind our back: next run starts another shim
+read -r kp _ < "$FLOW/.local/share/claude-copilot/shim.state" 2>/dev/null || kp=""
+[ -n "$kp" ] && kill "$kp"; sleep 0.5
+run_flow; rc=$?
+[ -n "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" ] && [ "$(sed -n 's/^TOKEN=//p' "$FLOW/claude.out")" != "" ]
+check "dead shim is restarted" $? "rc=$rc"
+[ "$(cat "$FLOW/shim.status")" = 404 ]; check "restarted shim accepts its key" $?
+
+# The following model and cleanup checks use the restarted normal shim.
+
+run_flow COPILOT_CLAUDE_MODEL=my-model COPILOT_SONNET_MODEL=s1 COPILOT_OPUS_MODEL=o1 COPILOT_HAIKU_MODEL=h1
+out=$(cat "$FLOW/claude.out")
+contains "$out" "MODEL=my-model" && contains "$out" "--model my-model"; check "COPILOT_CLAUDE_MODEL overrides model" $?
+contains "$out" "SONNET=s1" && contains "$out" "OPUS=o1" && contains "$out" "HAIKU=h1"; check "COPILOT_*_MODEL overrides tier mappings" $?
+
+# Keep the existing process-restart coverage below on a fresh normal shim.
+read -r kp _ < "$FLOW/.local/share/claude-copilot/shim.state" 2>/dev/null || kp=""
+[ -n "$kp" ] && kill "$kp"; sleep 0.5
+run_flow; rc=$?
+[ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" != "" ]; check "second dead shim is restarted" $? "rc=$rc"
+[ "$(cat "$FLOW/shim.status")" = 404 ]; check "second restarted shim accepts its key" $?
 
 run_flow COPILOT_CLAUDE_MODEL=my-model COPILOT_SONNET_MODEL=s1 COPILOT_OPUS_MODEL=o1 COPILOT_HAIKU_MODEL=h1
 out=$(cat "$FLOW/claude.out")
@@ -226,11 +254,33 @@ check "launcher propagates claude's exit code" $((rc == 7 ? 0 : 1)) "rc=$rc"
 
 # fixed port
 fp=$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+read -r original_pid original_port _ < "$FLOW/.local/share/claude-copilot/shim.state"
+rm -f "$FLOW/claude.out"
+run_flow COPILOT_SHIM_PORT=$fp; rc=$?
+check "different port cannot start a second shim" $((rc == 1 ? 0 : 1))
+contains "$(cat "$FLOW/stderr")" "shared shim already uses port"; check "port conflict explains shared shim policy" $?
+read -r current_pid current_port _ < "$FLOW/.local/share/claude-copilot/shim.state"
+[ "$original_pid:$original_port" = "$current_pid:$current_port" ] && [ ! -e "$FLOW/claude.out" ]; check "port conflict preserves the existing shim and does not run claude" $?
+run_flow COPILOT_SHIM_PORT=$original_port; check "matching port reuses shared shim" $?
+run_flow COPILOT_STATE_DIR="$FLOW/custom-state"; rc=$?
+[ "$rc" = 1 ] && [ ! -e "$FLOW/custom-state" ]; check "custom state directory is rejected without creating it" $?
+contains "$(cat "$FLOW/stderr")" "Unset COPILOT_STATE_DIR"; check "custom state rejection gives migration guidance" $?
+UNHEALTHY_HOME="$FLOW/unhealthy-home"
+mkdir -p "$UNHEALTHY_HOME/.local/share/claude-copilot"
+sleep 30 & unhealthy_pid=$!
+printf '%s %s bad-key old\n' "$unhealthy_pid" "$fp" > "$UNHEALTHY_HOME/.local/share/claude-copilot/shim.state"
+FLOW_HOME="$UNHEALTHY_HOME" run_flow; rc=$?
+check "live unhealthy shim PID blocks a second shim" $((rc == 1 ? 0 : 1))
+read -r recorded_pid _ < "$UNHEALTHY_HOME/.local/share/claude-copilot/shim.state"
+[ "$recorded_pid" = "$unhealthy_pid" ]; check "unhealthy shim retains its recorded state" $?
+kill "$unhealthy_pid"; wait "$unhealthy_pid" 2>/dev/null
+env -i HOME="$FLOW" PATH="$FLOW/bin:/usr/bin:/bin" /bin/bash "$SCRIPT" --stop-shim >/dev/null
 run_flow COPILOT_SHIM_PORT=$fp
 contains "$(cat "$FLOW/claude.out")" "BASE=http://127.0.0.1:$fp"; check "COPILOT_SHIM_PORT is honored" $?
 
 # busy fixed port (a fresh port: the previous one may still be in TIME_WAIT and refuse a plain bind)
 bp=$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+env -i HOME="$FLOW" PATH="$FLOW/bin:/usr/bin:/bin" /bin/bash "$SCRIPT" --stop-shim >/dev/null
 "$PY" -c 'import socket,time,sys; s=socket.socket(); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(1); time.sleep(20)' "$bp" & holder=$!
 sleep 0.5
 rm -f "$FLOW/claude.out"
@@ -241,15 +291,70 @@ contains "$(cat "$FLOW/stderr")" "busy"; check "busy port explains itself" $?
 [ ! -e "$FLOW/claude.out" ]; check "claude is not started when port is busy" $?
 
 # update notice: silent on first run and same version, says so once when the version changed
-run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+FLOW_HOME="$FLOW/st-ver-home" run_flow
 ! contains "$(cat "$FLOW/stderr")" "updated"; check "no update notice on first run" $?
-run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+FLOW_HOME="$FLOW/st-ver-home" run_flow
 ! contains "$(cat "$FLOW/stderr")" "updated"; check "no update notice on same version" $?
-echo 0.0.1 > "$FLOW/st-ver/last-version"
-run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+echo 0.0.1 > "$FLOW/st-ver-home/.local/share/claude-copilot/last-version"
+FLOW_HOME="$FLOW/st-ver-home" run_flow
 contains "$(cat "$FLOW/stderr")" "updated 0.0.1 -> "; check "update notice when the version changed" $?
-run_flow COPILOT_STATE_DIR="$FLOW/st-ver"
+FLOW_HOME="$FLOW/st-ver-home" run_flow
 ! contains "$(cat "$FLOW/stderr")" "updated"; check "update notice shows only once" $?
+
+# Deferred legacy cleanup is retried on later launches and does not advance its marker.
+LR="$FLOW/legacy-cleanup"
+mkdir -p "$LR/.local/share/claude-copilot"
+echo 0.0.1 > "$LR/.local/share/claude-copilot/legacy-cleanup-version"
+out=$(HOME="$LR" /bin/bash -c "
+  . '$SCRIPT'
+  _cc_version=2.0
+  shim=unused
+  cleanup_calls=0
+  python3() {
+    if [ \"\$3\" = cleanup ]; then cleanup_calls=\$((cleanup_calls + 1)); return 1; fi
+    command python3 \"\$@\"
+  }
+  _cc_legacy_cleanup '$LR/.local/share/claude-copilot' '$SCRIPT' 0.0.1 0.0.1
+  _cc_legacy_cleanup '$LR/.local/share/claude-copilot' '$SCRIPT' 0.0.1 2.0
+  [ \"\$cleanup_calls\" = 2 ] && [ \"\$_cc_legacy_cleanup_deferred\" = 1 ] &&
+    [ \"\$(cat '$LR/.local/share/claude-copilot/legacy-cleanup-version')\" = 0.0.1 ]
+  echo \$?
+")
+[ "$out" = 0 ]; check "deferred legacy cleanup retries without advancing its marker" $?
+
+# Slow legacy cleanup runs after the session in the background: it never delays claude or a concurrent launch.
+SC="$FLOW/slow-cleanup"; SC_STATE="$SC/home/.local/share/claude-copilot"
+mkdir -p "$SC/bin" "$SC/tmp" "$SC_STATE"
+ln -sf "$CURL" "$SC/bin/curl"
+cat > "$SC/bin/python3" <<EOF
+#!/bin/sh
+if [ "\$3" = cleanup ]; then
+  echo \$\$ >> "$SC/cleanup.started"
+  sleep 6
+  echo \$\$ >> "$SC/cleanup.done"
+  exit 1
+fi
+exec "$PY" "\$@"
+EOF
+cat > "$SC/bin/claude" <<EOF
+#!/bin/sh
+echo "\$ANTHROPIC_BASE_URL" >> "$SC/claude.log"
+EOF
+chmod +x "$SC/bin/python3" "$SC/bin/claude"
+echo 0.0.1 > "$SC_STATE/last-version"
+sc_run() { env -i HOME="$SC/home" PATH="$SC/bin:/usr/bin:/bin" TMPDIR="$SC/tmp" COPILOT_TOKEN_FILE="$FLOW/token" /bin/bash "$SCRIPT" >/dev/null 2>&1; }
+sc_t0=$(date +%s); sc_run; sc_rc=$?; sc_t1=$(date +%s)
+[ "$sc_rc" = 0 ] && [ "$(wc -l < "$SC/claude.log")" -eq 1 ] && [ $((sc_t1 - sc_t0)) -lt 5 ] && [ ! -e "$SC/cleanup.done" ]
+check "slow legacy cleanup does not delay the launcher" $? "rc=$sc_rc took=$((sc_t1 - sc_t0))s"
+for i in $(seq 1 50); do [ -s "$SC/cleanup.started" ] && break; sleep 0.1; done
+[ -s "$SC/cleanup.started" ]; check "legacy cleanup is scheduled after the session exits" $?
+sc_t0=$(date +%s); sc_run; sc_rc=$?; sc_t1=$(date +%s)
+[ "$sc_rc" = 0 ] && [ "$(wc -l < "$SC/claude.log")" -eq 2 ] && [ $((sc_t1 - sc_t0)) -lt 5 ] && [ ! -e "$SC/cleanup.done" ]
+check "launch during a running legacy cleanup starts claude without waiting" $? "rc=$sc_rc took=$((sc_t1 - sc_t0))s"
+[ ! -e "$SC_STATE/shim.lock" ]; check "background legacy cleanup does not hold the shim lock" $?
+[ "$(sort -u "$SC/claude.log" | wc -l)" -eq 1 ]; check "concurrent launch keeps the shared shim" $?
+[ "$(cat "$SC_STATE/legacy-cleanup-version" 2>/dev/null)" != "$(cat "$ROOT/VERSION")" ]; check "deferred background cleanup keeps its retry marker" $?
+for p in $(cat "$SC/cleanup.started"); do kill "$p" 2>/dev/null; done
 
 # login failure stops the launcher
 rm -f "$FLOW/claude.out"
@@ -264,11 +369,10 @@ env -i HOME="$FLOW/emptyhome" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" 
 check "login failure aborts before claude" $? "rc=$rc"
 
 # non-numeric port is rejected up front
-# outdated shim + COPILOT_SHIM_PORT equal to its port: restarted on that port, not "port busy"
-sf="$FLOW/.local/share/claude-copilot/shim.state"
-read -r op1 op2 op3 _ < "$sf"; port=$op2; echo "$op1 $op2 $op3 0.0.0-old" > "$sf"
-run_flow COPILOT_SHIM_PORT="$port"; rc=$?
-[ "$rc" -eq 0 ] && [ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" = "$port" ]; check "outdated shim restarts on the configured port" $? "rc=$rc $(cat "$FLOW/stderr")"
+# a configured port is reusable after the previous client stopped
+fp=$("$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+run_flow COPILOT_SHIM_PORT="$fp"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(sed -n 's/^BASE=.*://p' "$FLOW/claude.out")" = "$fp" ]; check "shim starts on the configured port after cleanup" $? "rc=$rc $(cat "$FLOW/stderr")"
 rm -f "$FLOW/claude.out"
 run_flow COPILOT_SHIM_PORT=abc; rc=$?
 check "non-numeric COPILOT_SHIM_PORT fails" $((rc == 1 ? 0 : 1))
@@ -276,8 +380,8 @@ contains "$(cat "$FLOW/stderr")" "must be a port number"; check "non-numeric por
 [ ! -e "$FLOW/claude.out" ]; check "claude is not started on a bad port" $?
 
 # symlinked log path is refused
-mkdir -p "$FLOW/st2"; ln -sf "$FLOW/victim" "$FLOW/st2/claude-copilot.log"
-env -i HOME="$FLOW" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_STATE_DIR="$FLOW/st2" COPILOT_TOKEN_FILE="$FLOW/token" /bin/bash "$SCRIPT" 2>"$FLOW/stderr"; rc=$?
+mkdir -p "$FLOW/st2-home/.local/share/claude-copilot"; ln -sf "$FLOW/victim" "$FLOW/st2-home/.local/share/claude-copilot/claude-copilot.log"
+env -i HOME="$FLOW/st2-home" PATH="$FLOW/bin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" /bin/bash "$SCRIPT" 2>"$FLOW/stderr"; rc=$?
 [ "$rc" -eq 1 ] && [ ! -e "$FLOW/victim" ]; check "symlinked log is refused, target untouched" $? "rc=$rc"
 
 # works under set -u (empty --settings array on old bash)
@@ -299,21 +403,21 @@ chmod +x "$FLOW/pybin/python3"
 
 # shim never comes up: launcher gives up with a message, no claude, nothing left behind
 rm -f "$FLOW/claude.out"
-env -i HOME="$FLOW" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" COPILOT_STATE_DIR="$FLOW/st-die" FAKE_SERVE=die \
+env -i HOME="$FLOW/st-die-home" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" FAKE_SERVE=die \
   /bin/bash "$SCRIPT" 2>"$FLOW/stderr"; rc=$?
 [ "$rc" -eq 1 ]; check "launcher fails when the shim dies at startup" $? "rc=$rc"
 contains "$(cat "$FLOW/stderr")" "shim didn't start"; check "startup failure is reported" $?
 [ ! -e "$FLOW/claude.out" ]; check "claude is not started when the shim dies" $?
 [ -z "$(ls "$FLOW/tmp" | grep -v claude-copilot.log)" ]; check "startup failure leaves no temp files" $?
-[ -z "$(ls "$FLOW/st-die" | grep '^start\.')" ]; check "startup failure leaves nothing in the state dir" $?
+[ -z "$(ls "$FLOW/st-die-home/.local/share/claude-copilot" | grep '^start\.')" ]; check "startup failure leaves nothing in the state dir" $?
 
 # signal during startup: shim is killed, files removed, right exit code
 for sig in TERM INT HUP; do
   case $sig in TERM) want=143 ;; INT) want=130 ;; HUP) want=129 ;; esac
-  env -i HOME="$FLOW" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" COPILOT_STATE_DIR="$FLOW/st-hang-$sig" FAKE_SERVE=hang \
+  env -i HOME="$FLOW/st-hang-$sig-home" PATH="$FLOW/pybin:/usr/bin:/bin" TMPDIR="$FLOW/tmp" COPILOT_TOKEN_FILE="$FLOW/token" FAKE_SERVE=hang \
     perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV' /bin/bash "$SCRIPT" 2>/dev/null & lp=$!
   spid=""
-  for _ in $(seq 1 50); do spid=$(cat "$FLOW/st-hang-$sig"/start.*.pid 2>/dev/null); [ -n "$spid" ] && break; sleep 0.1; done
+  for _ in $(seq 1 50); do spid=$(cat "$FLOW/st-hang-$sig-home/.local/share/claude-copilot"/start.*.pid 2>/dev/null); [ -n "$spid" ] && break; sleep 0.1; done
   kill -$sig $lp; wait $lp 2>/dev/null; rc=$?
   [ "$rc" -eq "$want" ]; check "SIG$sig during startup returns $want" $? "rc=$rc"
   sleep 0.2
@@ -404,8 +508,11 @@ chmod +x "$CW/bin/child"
 echo tok > "$CW/token"
 cw_run() { env -i HOME="$CW/home" PATH="$CW/bin:/usr/bin:/bin" TMPDIR="$CW/tmp" COPILOT_TOKEN_FILE="$CW/token" "$@"; }
 
-# many launchers at once end up on one shim
-for i in 1 2 3 4 5 6; do cw_run /bin/bash "$SCRIPT" >/dev/null 2>&1 & done
+# Launchers in different projects still share the per-user shim.
+for i in 1 2 3 4 5 6; do
+  mkdir -p "$CW/project-$i"
+  cw_run /bin/bash -c "cd '$CW/project-$i' && /bin/bash '$SCRIPT'" >/dev/null 2>&1 &
+done
 wait
 [ "$(wc -l < "$CW/claude.log")" -eq 6 ]; check "all concurrent launchers ran claude" $? "$(cat "$CW/claude.log")"
 [ "$(awk '{print $1}' "$CW/claude.log" | sort -u | wc -l)" -eq 1 ]; check "concurrent launchers share one shim" $? "$(cat "$CW/claude.log")"
@@ -422,6 +529,20 @@ cw_run /bin/bash "$SCRIPT" >/dev/null 2>&1; check "stale break lock is cleared" 
 [ ! -e "$CW/home/.local/share/claude-copilot/shim.lock.break" ]; check "break lock released" $?
 
 # a live owner's lock is never broken
+OWNERLESS="$TMP/ownerless"
+mkdir -p "$OWNERLESS/shim.lock"
+touch -t 200001010000 "$OWNERLESS/shim.lock"
+/bin/bash -c ". '$SCRIPT'; _cc_lock_take '$OWNERLESS/shim.lock' && _cc_lock_drop"
+check "old ownerless shim lock is recovered" $?
+mkdir "$OWNERLESS/shim.lock" "$OWNERLESS/shim.lock.break"
+touch -t 200001010000 "$OWNERLESS/shim.lock" "$OWNERLESS/shim.lock.break"
+/bin/bash -c ". '$SCRIPT'; _cc_lock_take '$OWNERLESS/shim.lock' && _cc_lock_drop"
+check "old ownerless breaker lock is recovered" $?
+mkdir "$OWNERLESS/shim.lock"
+/bin/bash -c ". '$SCRIPT'; _cc_lock_break '$OWNERLESS/shim.lock'"
+[ -d "$OWNERLESS/shim.lock" ]; check "new ownerless lock is protected during PID publication" $?
+rmdir "$OWNERLESS/shim.lock"
+
 LK="$TMP/lk"; mkdir -p "$LK/shim.lock"; sleep 30 & lp=$!; echo $lp > "$LK/shim.lock/pid"
 /bin/bash -c ". '$SCRIPT'; _cc_lock_break '$LK/shim.lock'"
 [ -d "$LK/shim.lock" ]; check "live lock owner keeps its lock" $?
@@ -436,6 +557,56 @@ check "wrapper mode propagates the command's exit code" $((rc == 5 ? 0 : 1)) "rc
 contains "$(cat "$CW/child.out")" "|a b"; check "wrapper mode forwards the command args unchanged" $?
 contains "$(cat "$CW/child.out")" "http://127.0.0.1:"; check "wrapper mode points the command at the shim" $?
 [ ! -s "$CW/claude.log" ]; check "wrapper mode does not start claude" $?
+
+# Spare wrappers must clean up even when the shim has already disappeared.
+cat > "$CW/bin/spare" <<FAKE
+#!/bin/bash
+if [ "\$1" = agents ]; then cat "$CW/registry"; exit 0; fi
+if [ "\$1" = --bg-pty-host ]; then
+  shift 5
+  "\$@" &
+  wait
+  exit \$?
+fi
+echo \$\$ > "$CW/spare.pid"
+trap 'exit 0' TERM
+sleep 60 &
+wait
+FAKE
+chmod +x "$CW/bin/spare"
+echo '[{"state":"running"}]' > "$CW/registry"
+cw_run env COPILOT_SHIM_IDLE_GRACE=1 /bin/bash "$SCRIPT" "$CW/bin/spare" --bg-spare >/dev/null 2>&1 & spare_launcher=$!
+for i in $(seq 1 100); do [ -f "$CW/spare.pid" ] && break; sleep 0.1; done
+read -r spare_pid < "$CW/spare.pid"
+sleep 3
+kill -0 "$spare_pid" 2>/dev/null; check "registered session keeps spare worker alive" $?
+cw_run /bin/bash "$SCRIPT" --stop-shim >/dev/null 2>&1
+echo '[]' > "$CW/registry"
+for i in $(seq 1 100); do kill -0 "$spare_launcher" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$spare_launcher" 2>/dev/null; then
+  check "idle spare wrapper exits without a running shim" 1
+  kill "$spare_launcher" "$spare_pid" 2>/dev/null
+else
+  check "idle spare wrapper exits without a running shim" 0
+fi
+wait "$spare_launcher" 2>/dev/null
+kill -0 "$spare_pid" 2>/dev/null
+check "idle spare child is terminated" $(( $? == 0 ? 1 : 0 ))
+
+rm -f "$CW/spare.pid"
+cw_run env COPILOT_SHIM_IDLE_GRACE=1 /bin/bash "$SCRIPT" "$CW/bin/spare" --bg-pty-host socket 200 50 -- "$SCRIPT" "$CW/bin/spare" --bg-spare >"$CW/spare-host.log" 2>&1 & spare_host=$!
+for i in $(seq 1 100); do [ -f "$CW/spare.pid" ] && break; sleep 0.1; done
+read -r spare_pid < "$CW/spare.pid"
+for i in $(seq 1 150); do kill -0 "$spare_host" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$spare_host" 2>/dev/null; then
+  check "nested spare PTY host does not retain an ordinary client lease" 1 "$(cat "$CW/spare-host.log")"
+  kill "$spare_host" "$spare_pid" 2>/dev/null
+else
+  check "nested spare PTY host does not retain an ordinary client lease" 0
+fi
+wait "$spare_host" 2>/dev/null
+kill -0 "$spare_pid" 2>/dev/null
+check "nested spare worker is terminated with its host" $(( $? == 0 ? 1 : 0 ))
 
 cw_run /bin/bash "$SCRIPT" child >/dev/null 2>&1
 [ -s "$CW/claude.log" ]; check "relative command name is not wrapper mode" $?
@@ -454,8 +625,8 @@ chmod +x "$CW/bin/curl"
 cw_run /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1
 sfile=$(sed -n '/^--settings$/{n;p;}' "$CW/claude.args")
 [ -f "$sfile" ]; check "--settings is a file path" $? "$(cat "$CW/claude.args")"
-key=$(awk '{print $3}' "$CW/home/.local/share/claude-copilot/shim.state")
-! grep -q "$key" "$CW/claude.args"; check "shim key is not in claude's argv" $?
+key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["env"]["ANTHROPIC_AUTH_TOKEN"])' "$sfile" 2>/dev/null)
+[ -n "$key" ] && ! grep -q "$key" "$CW/claude.args"; check "shim key is not in claude's argv" $?
 grep -q "$key" "$sfile"; check "settings file carries the shim key" $?
 [ "$(ls -l "$sfile" | cut -c1-10)" = "-rw-------" ]; check "settings file is mode 600" $?
 

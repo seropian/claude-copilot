@@ -10,6 +10,7 @@ import threading
 import time
 import types
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -58,6 +59,459 @@ class CliMain(unittest.TestCase):
         self.assertEqual(cli.main([]), 2)
         self.assertEqual(cli.main(["serve", "0"]), 2)
         self.assertEqual(cli.main(["bogus"]), 2)
+        self.assertEqual(cli.main(["spare", "/tmp"]), 2)
+
+
+class SpareLifecycle(unittest.TestCase):
+    def setUp(self):
+        from claude_copilot_shim import cli
+        self.cli = cli
+        binary = mock.patch.object(cli.shutil, "which", return_value="/usr/local/bin/claude")
+        binary.start()
+        self.addCleanup(binary.stop)
+
+    def test_lease_token_normalizes_ps_spacing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "123")
+            with open(path, "w") as f:
+                f.write("Thu Oct 8 17:38:34 2026\n")
+            with mock.patch.object(self.cli.subprocess, "check_output", return_value=b"Thu Oct  8 17:38:34 2026\n"):
+                self.assertTrue(self.cli._lease_live(path))
+
+    def test_primary_lease_blocks_spare_cleanup(self):
+        with mock.patch.object(self.cli.glob, "glob", return_value=["/state/leases/123"]), \
+             mock.patch.object(self.cli, "_lease_live", side_effect=[True, False]), \
+             mock.patch.object(self.cli.subprocess, "check_output") as registry:
+            self.assertFalse(self.cli._spare_idle("/state", "/claude"))
+            registry.assert_not_called()
+
+    def idle(self, sessions=b"[]", status=None):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {"inflight": 1} if status is None else status).encode()
+        with mock.patch.object(self.cli.glob, "glob", return_value=[]), \
+             mock.patch.object(self.cli.subprocess, "check_output", return_value=sessions), \
+             mock.patch.object(self.cli.urllib.request, "urlopen", return_value=response), \
+             mock.patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1234", "ANTHROPIC_AUTH_TOKEN": "key"}):
+            return self.cli._spare_idle("/state", "/claude")
+
+    def test_empty_registry_and_idle_shim_allow_cleanup(self):
+        self.assertTrue(self.idle())
+
+    def test_any_registered_session_protects_workers(self):
+        self.assertFalse(self.idle(b'[{"state":"running"}]'))
+
+    def test_inflight_request_protects_workers(self):
+        self.assertFalse(self.idle(status={"inflight": 2}))
+
+    def test_malformed_registry_is_not_idle(self):
+        for sessions in (b"{}", b"not json"):
+            with self.subTest(sessions=sessions), self.assertRaises(ValueError):
+                self.idle(sessions)
+
+    def test_missing_status_count_is_not_idle(self):
+        with self.assertRaises(ValueError):
+            self.idle(status={})
+
+    def test_no_shim_does_not_block_worker_cleanup(self):
+        import errno
+        error = urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "refused"))
+        with mock.patch.object(self.cli.glob, "glob", return_value=[]), \
+             mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]"), \
+             mock.patch.object(self.cli.urllib.request, "urlopen", side_effect=error), \
+             mock.patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1234", "ANTHROPIC_AUTH_TOKEN": "key"}):
+            self.assertTrue(self.cli._spare_idle("/state", "/claude"))
+
+    def test_process_tree_excludes_unrelated_processes(self):
+        rows = b"10 1 Mon Jan 1\n11 10 Mon Jan 1\n12 11 Mon Jan 1\n20 1 Mon Jan 1\n"
+        with mock.patch.object(self.cli.subprocess, "check_output", return_value=rows):
+            self.assertEqual([pid for pid, _ in self.cli._spare_processes(10)], [10, 11, 12])
+
+    def test_pid_reuse_is_not_signaled(self):
+        with mock.patch.object(self.cli.subprocess, "check_output", return_value=b"new token"), \
+             mock.patch.object(self.cli.os, "kill") as kill:
+            self.cli._signal_spare([(123, "old token")], self.cli.signal.SIGTERM)
+            kill.assert_not_called()
+
+    def test_zombie_descendants_do_not_delay_cleanup(self):
+        with mock.patch.object(self.cli.subprocess, "check_output", return_value=b"Z old token"), \
+             mock.patch.object(self.cli.os, "kill") as kill:
+            self.assertEqual(self.cli._signal_spare([(123, "old token")], 0), [])
+            kill.assert_not_called()
+
+    def test_zero_grace_preserves_worker_exit_code(self):
+        with mock.patch.object(self.cli, "_idle_grace", return_value=0), \
+             mock.patch.object(self.cli.subprocess, "call", return_value=5):
+            self.assertEqual(self.cli._run_spare("/state", ["/claude", "--bg-spare"]), 5)
+
+    def test_activation_resets_idle_timer_and_registry_failure_defers_cleanup(self):
+        child = mock.Mock()
+        child.poll.side_effect = [None] * 5 + [0, 0]
+        child.wait.return_value = 0
+        with mock.patch.object(self.cli, "_idle_grace", return_value=2), \
+             mock.patch.object(self.cli.subprocess, "Popen", return_value=child), \
+             mock.patch.object(self.cli, "_spare_idle", side_effect=[True, True, False, ValueError("bad registry"), True]), \
+             mock.patch.object(self.cli.time, "monotonic", side_effect=[0, 1, 2, 3, 4]), \
+             mock.patch.object(self.cli.threading, "Event") as event, \
+             mock.patch.object(self.cli, "_signal_spare") as terminate:
+            event.return_value.is_set.return_value = False
+            self.assertEqual(self.cli._run_spare("/state", ["/claude", "--bg-spare"]), 0)
+            terminate.assert_not_called()
+
+    def test_idle_grace_terminates_only_the_owned_tree(self):
+        child = mock.Mock(pid=123)
+        child.poll.return_value = None
+        child.wait.return_value = -self.cli.signal.SIGTERM
+        owned = [(123, "host"), (124, "worker")]
+        with mock.patch.object(self.cli, "_idle_grace", return_value=2), \
+             mock.patch.object(self.cli.subprocess, "Popen", return_value=child), \
+             mock.patch.object(self.cli, "_spare_idle", return_value=True), \
+             mock.patch.object(self.cli.time, "monotonic", side_effect=[0, 1, 2, 3]), \
+             mock.patch.object(self.cli.threading, "Event") as event, \
+             mock.patch.object(self.cli, "_spare_processes", return_value=owned), \
+             mock.patch.object(self.cli, "_signal_spare", return_value=[]) as terminate:
+            event.return_value.is_set.return_value = False
+            self.assertEqual(self.cli._run_spare("/state", ["/claude", "--bg-spare"]), 143)
+            terminate.assert_has_calls([
+                mock.call(owned, self.cli.signal.SIGTERM),
+                mock.call(owned, 0),
+                mock.call(owned, self.cli.signal.SIGKILL)])
+
+    def test_legacy_wrapper_signature_is_exact(self):
+        launcher = "/opt/claude-copilot.sh"
+        command = "/bin/bash %s /usr/local/bin/claude --bg-spare" % launcher
+        self.assertTrue(self.cli._legacy_wrapper(command, launcher))
+        self.assertFalse(self.cli._legacy_wrapper(command + " --other", launcher))
+        self.assertFalse(self.cli._legacy_wrapper(command, "/other/launcher.sh"))
+        self.assertFalse(self.cli._legacy_wrapper(
+            "/bin/bash %s /bin/sh --bg-spare" % launcher, launcher
+        ))
+
+    def legacy_host_tree(self):
+        launcher = os.path.join(ROOT, "dist", "claude-copilot.sh")
+        binary = os.path.expanduser("~/.local/share/claude/versions/2.1.292")
+        socket = "/tmp/cc-daemon-%d/190a3491/spare/434b4ca8" % os.getuid()
+        spare = "%s %s --bg-spare %s.claim.sock" % (launcher, binary, socket)
+        host = "bash %s %s --bg-pty-host %s.pty.sock 200 50 -- %s" % (
+            launcher, binary, socket, spare)
+        commands = [
+            (410, 1, host), (411, 410, binary + " --bg-pty-host"),
+            (412, 411, "bash " + spare), (413, 412, binary + " --bg-spare"),
+        ]
+        return launcher, {
+            pid: {"parent": parent, "uid": os.getuid(), "start": "start-%d" % pid, "command": command}
+            for pid, parent, command in commands
+        }
+
+    def test_legacy_native_host_and_claim_socket_are_recognized(self):
+        launcher, processes = self.legacy_host_tree()
+        self.assertTrue(self.cli._legacy_wrapper(processes[410]["command"], launcher))
+        self.assertTrue(self.cli._legacy_wrapper(processes[412]["command"], launcher))
+        host = processes[410]["command"]
+        for command in (
+            host + " extra", host.replace("200 50 --", "bad 50 --"),
+            host.replace("200 50 --", "0 50 --"),
+            host.replace("434b4ca8.claim.sock", "other.claim.sock"),
+            host.replace("2.1.292", "../outside"),
+            host.replace(os.path.expanduser("~/.local/share/claude/versions/2.1.292"),
+                         "/untrusted/claude"),
+            host.replace(launcher, "/wrong/claude-copilot.sh"),
+            host.replace("bash ", "bash \"", 1) + "\"",
+            host.replace(launcher, launcher.replace("claude-copilot", "claude copilot")),
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(self.cli._legacy_wrapper(command, launcher))
+
+    def test_legacy_claude_path_uses_resolved_command_or_trusted_versions(self):
+        self.assertTrue(self.cli._claude_arg("/usr/local/bin/claude"))
+        self.assertFalse(self.cli._claude_arg("/arbitrary/claude"))
+        with mock.patch.object(self.cli.shutil, "which", return_value=None):
+            self.assertFalse(self.cli._claude_arg("/usr/local/bin/claude"))
+            self.assertTrue(self.cli._claude_arg(
+                os.path.expanduser("~/.local/share/claude/versions/2.1.292")))
+        with mock.patch.object(self.cli.os.path, "realpath", side_effect=lambda p: "/untrusted/binary"
+                               if p.endswith("/2.1.292") else p):
+            self.assertFalse(self.cli._claude_arg(
+                os.path.expanduser("~/.local/share/claude/versions/2.1.292")))
+
+    def test_legacy_nested_host_with_live_owned_leases_and_missing_shim_is_cleaned(self):
+        launcher, processes = self.legacy_host_tree()
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("leases", "spares"):
+                os.mkdir(os.path.join(directory, name))
+                for pid in (410, 412):
+                    with open(os.path.join(directory, name, str(pid)), "w") as f:
+                        f.write(processes[pid]["start"] + "\n")
+            with mock.patch.object(self.cli, "_process_rows", return_value=processes), \
+                 mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]") as registry, \
+                 mock.patch.object(self.cli, "_same_process", return_value=True), \
+                 mock.patch.object(self.cli, "_terminate_legacy_tree", return_value=True) as terminate:
+                self.assertEqual(self.cli._cleanup_legacy(directory, launcher, "2.0"), 0)
+                terminate.assert_called_once_with(processes, 410)
+                self.assertEqual(registry.call_count, 2)
+
+    def test_bundled_cleanup_dispatch_handles_real_host_shape_and_owned_lease(self):
+        launcher, processes = self.legacy_host_tree()
+        source = load_artifact_shim().rsplit("\nimport sys\nsys.exit(", 1)[0]
+        bundled = {}
+        exec(compile(source, "<bundled-shim>", "exec"), bundled)
+        terminate = mock.Mock(return_value=True)
+        with tempfile.TemporaryDirectory() as directory:
+            os.mkdir(os.path.join(directory, "leases"))
+            with open(os.path.join(directory, "leases", "412"), "w") as f:
+                f.write(processes[412]["start"])
+            with mock.patch.dict(bundled, {
+                "_process_rows": lambda: processes,
+                "_same_process": lambda pid, uid, start: True,
+                "_terminate_legacy_tree": terminate,
+            }), mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]"):
+                self.assertEqual(bundled["main"](["cleanup", directory, launcher, "2.0"]), 0)
+                terminate.assert_called_once_with(processes, 410)
+
+    def test_legacy_old_shim_and_nested_host_owned_leases_are_cleaned(self):
+        launcher, processes = self.legacy_host_tree()
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "shim.state"), "w") as f:
+                f.write("123 456 secret old-version\n")
+            os.chmod(os.path.join(directory, "shim.state"), 0o600)
+            os.mkdir(os.path.join(directory, "leases"))
+            with open(os.path.join(directory, "leases", "412"), "w") as f:
+                f.write(processes[412]["start"])
+            processes[123] = {
+                "parent": 1, "uid": os.getuid(), "start": "shim-start",
+                "command": "/usr/bin/python3 -c code /_shim/status CopilotRequestHandler serve 456 %s" %
+                           os.path.join(directory, "start.abcd"),
+            }
+            shim_liveness = iter([True, False, False])
+            with mock.patch.object(self.cli, "_process_rows", return_value=processes), \
+                 mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]"), \
+                 mock.patch.object(self.cli, "_shim_status", return_value=1), \
+                 mock.patch.object(self.cli, "_same_process",
+                                   side_effect=lambda pid, uid, start:
+                                   next(shim_liveness) if pid == 123 else True), \
+                 mock.patch.object(self.cli, "_terminate_legacy_tree", return_value=True) as terminate, \
+                 mock.patch.object(self.cli.os, "kill") as kill:
+                self.assertEqual(self.cli._cleanup_legacy(directory, launcher, "2.0"), 0)
+                kill.assert_called_once_with(123, self.cli.signal.SIGTERM)
+                terminate.assert_called_once_with(processes, 410)
+
+    def test_legacy_unknown_shim_is_preserved_with_verified_wrappers(self):
+        launcher, processes = self.legacy_host_tree()
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "shim.state"), "w") as f:
+                f.write("123 456 secret old-version\n")
+            os.chmod(os.path.join(directory, "shim.state"), 0o600)
+            processes[123] = dict(processes[413], parent=1, command="/usr/bin/python3 unrelated")
+            with mock.patch.object(self.cli, "_process_rows", return_value=processes), \
+                 mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]"), \
+                 mock.patch.object(self.cli, "_shim_status") as status, \
+                 mock.patch.object(self.cli, "_terminate_legacy_tree") as terminate, \
+                 mock.patch.object(self.cli.os, "kill") as kill:
+                self.assertEqual(self.cli._cleanup_legacy(directory, launcher, "2.0"), 1)
+                status.assert_not_called()
+                terminate.assert_not_called()
+                kill.assert_not_called()
+
+    def test_legacy_owned_lease_does_not_hide_active_or_changed_clients(self):
+        launcher, processes = self.legacy_host_tree()
+        for scenario in ("other-lease", "reused-pid", "wrong-start", "sessions",
+                         "registry-unavailable", "registry-invalid", "lease-appeared"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                lease_dir = os.path.join(directory, "leases")
+                os.mkdir(lease_dir)
+                with open(os.path.join(lease_dir, "410"), "w") as f:
+                    f.write("changed" if scenario == "wrong-start" else processes[410]["start"])
+                if scenario == "other-lease":
+                    with open(os.path.join(lease_dir, "999"), "w") as f:
+                        f.write("active")
+                calls = [0]
+
+                def registry(*args, **kwargs):
+                    calls[0] += 1
+                    if scenario == "registry-unavailable":
+                        raise OSError("unavailable")
+                    if scenario == "lease-appeared" and calls[0] == 2:
+                        with open(os.path.join(lease_dir, "999"), "w") as f:
+                            f.write("active")
+                    return b'[{"state":"running"}]' if scenario == "sessions" else (
+                        b"{}" if scenario == "registry-invalid" else b"[]")
+
+                with mock.patch.object(self.cli, "_process_rows", return_value=processes), \
+                     mock.patch.object(self.cli.subprocess, "check_output", side_effect=registry), \
+                     mock.patch.object(self.cli, "_same_process", return_value=scenario != "reused-pid"), \
+                     mock.patch.object(self.cli, "_terminate_legacy_tree") as terminate:
+                    self.assertEqual(self.cli._cleanup_legacy(directory, launcher, "2.0"), 1)
+                    terminate.assert_not_called()
+
+    def test_legacy_unowned_root_and_foreign_descendant_defer_cleanup(self):
+        launcher, processes = self.legacy_host_tree()
+        for scenario in ("non-orphan", "foreign-descendant", "unknown-root"):
+            with self.subTest(scenario=scenario):
+                rows = {pid: dict(process) for pid, process in processes.items()}
+                if scenario == "non-orphan":
+                    rows[410]["parent"] = 999
+                elif scenario == "foreign-descendant":
+                    rows[413]["uid"] += 1
+                else:
+                    rows[499] = dict(rows[410], command=launcher + " --bg-spare")
+                with mock.patch.object(self.cli, "_process_rows", return_value=rows), \
+                     mock.patch.object(self.cli, "_terminate_legacy_tree") as terminate:
+                    self.assertEqual(self.cli._cleanup_legacy("/state", launcher, "2.0"), 1)
+                    terminate.assert_not_called()
+
+    def test_legacy_tree_signals_only_uid_and_start_matching_processes(self):
+        _, processes = self.legacy_host_tree()
+        with mock.patch.object(self.cli, "_same_process",
+                               side_effect=lambda pid, uid, start: pid != 412), \
+             mock.patch.object(self.cli.os, "kill") as kill, \
+             mock.patch.object(self.cli.time, "monotonic", side_effect=[0, 3]):
+            self.assertFalse(self.cli._terminate_legacy_tree(processes, 410))
+            self.assertEqual(kill.call_args_list, [
+                mock.call(pid, sig) for sig in (self.cli.signal.SIGTERM, self.cli.signal.SIGKILL)
+                for pid in (413, 411, 410)])
+
+    def test_legacy_cleanup_defers_when_sessions_are_registered(self):
+        launcher = "/opt/claude-copilot.sh"
+        process = {
+            "parent": 1,
+            "uid": os.getuid(),
+            "start": "start",
+            "command": "/bin/bash %s /usr/local/bin/claude --bg-spare" % launcher,
+        }
+        with mock.patch.object(self.cli, "_process_rows", return_value={123: process}), \
+             mock.patch.object(self.cli.subprocess, "check_output", return_value=b'[{"state":"running"}]'), \
+             mock.patch.object(self.cli, "_terminate_legacy_tree") as terminate:
+            self.assertEqual(self.cli._cleanup_legacy("/state", launcher, "2.0"), 1)
+            terminate.assert_not_called()
+
+    def test_legacy_cleanup_defers_when_wrapper_ownership_is_uncertain(self):
+        launcher = "/opt/claude-copilot.sh"
+        process = {"parent": 1, "uid": os.getuid(), "start": "start", "command": launcher + " --bg-spare"}
+        with mock.patch.object(self.cli, "_process_rows", return_value={123: process}), \
+             mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]"), \
+             mock.patch.object(self.cli, "_terminate_legacy_tree") as terminate:
+            self.assertEqual(self.cli._cleanup_legacy("/state", launcher, "2.0"), 1)
+            terminate.assert_not_called()
+
+    def test_legacy_cleanup_preserves_shim_without_authenticated_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "shim.state")
+            with open(path, "w") as f:
+                f.write("123 456 secret old-version\n")
+            os.chmod(path, 0o600)
+            process = {
+                "parent": 1,
+                "uid": os.getuid(),
+                "start": "start",
+                "command": "/usr/bin/python3 -c code /_shim/status CopilotRequestHandler serve 456 %s" %
+                os.path.join(directory, "start.abcd"),
+            }
+            with mock.patch.object(self.cli, "_process_rows", return_value={123: process}), \
+                 mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]"), \
+                 mock.patch.object(self.cli, "_shim_status", return_value=None), \
+                 mock.patch.object(self.cli.os, "kill") as kill:
+                self.assertEqual(self.cli._cleanup_legacy(directory, "/opt/claude-copilot.sh", "2.0"), 1)
+                kill.assert_not_called()
+
+    def test_legacy_cleanup_stops_only_verified_idle_old_shim_and_wrapper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "shim.state"), "w") as f:
+                f.write("123 456 secret old-version\n")
+            os.chmod(os.path.join(directory, "shim.state"), 0o600)
+            launcher = "/opt/claude-copilot.sh"
+            shim = {
+                "parent": 1,
+                "uid": os.getuid(),
+                "start": "shim-start",
+                "command": "/usr/bin/python3 -c code /_shim/status CopilotRequestHandler serve 456 %s" %
+                os.path.join(directory, "start.abcd"),
+            }
+            wrapper = {
+                "parent": 1,
+                "uid": os.getuid(),
+                "start": "wrapper-start",
+                "command": "/bin/bash %s /usr/local/bin/claude --bg-spare" % launcher,
+            }
+            processes = {123: shim, 124: wrapper}
+            with mock.patch.object(self.cli, "_process_rows", return_value=processes), \
+                 mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]"), \
+                 mock.patch.object(self.cli, "_shim_status", return_value=1), \
+                 mock.patch.object(self.cli, "_same_process", side_effect=[True, False, False]), \
+                 mock.patch.object(self.cli, "_terminate_legacy_tree", return_value=True) as terminate, \
+                 mock.patch.object(self.cli.os, "kill") as kill:
+                self.assertEqual(self.cli._cleanup_legacy(directory, launcher, "2.0"), 0)
+                kill.assert_called_once_with(123, self.cli.signal.SIGTERM)
+                terminate.assert_called_once_with(processes, 124)
+            self.assertFalse(os.path.exists(os.path.join(directory, "shim.state")))
+            self.assertFalse(os.path.exists(os.path.join(directory, "shim.lock")))
+
+    def stale_shim_dir(self, directory):
+        with open(os.path.join(directory, "shim.state"), "w") as f:
+            f.write("123 456 secret old-version\n")
+        os.chmod(os.path.join(directory, "shim.state"), 0o600)
+        return {123: {
+            "parent": 1, "uid": os.getuid(), "start": "shim-start",
+            "command": "/usr/bin/python3 -c code /_shim/status CopilotRequestHandler serve 456 %s" %
+                       os.path.join(directory, "start.abcd"),
+        }}
+
+    def test_stale_shim_stop_skips_without_waiting_when_a_launcher_holds_the_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            processes = self.stale_shim_dir(directory)
+            os.mkdir(os.path.join(directory, "shim.lock"))
+            with open(os.path.join(directory, "shim.lock", "pid"), "w") as f:
+                f.write("%d\n" % os.getppid())
+            with mock.patch.object(self.cli, "_process_rows", return_value=processes), \
+                 mock.patch.object(self.cli.subprocess, "check_output", return_value=b"[]"), \
+                 mock.patch.object(self.cli, "_shim_status", return_value=1), \
+                 mock.patch.object(self.cli, "_same_process", return_value=True), \
+                 mock.patch.object(self.cli.time, "sleep") as sleep, \
+                 mock.patch.object(self.cli.os, "kill") as kill:
+                self.assertEqual(self.cli._cleanup_legacy(directory, "/opt/claude-copilot.sh", "2.0"), 1)
+                kill.assert_not_called()
+                sleep.assert_not_called()
+            self.assertTrue(os.path.exists(os.path.join(directory, "shim.state")))
+            with open(os.path.join(directory, "shim.lock", "pid")) as f:
+                self.assertEqual(f.read().strip(), str(os.getppid()))
+
+    def test_stale_shim_stop_rechecks_launcher_changes_under_the_lock(self):
+        for scenario in ("lease", "state", "busy"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                processes = self.stale_shim_dir(directory)
+                lease_checks = iter([False, False, scenario == "lease"])
+                statuses = iter([1, 1, 2 if scenario == "busy" else 1])
+
+                def registry(*args, **kwargs):
+                    if scenario == "state":
+                        with open(os.path.join(directory, "shim.state"), "w") as f:
+                            f.write("777 456 secret 2.0\n")
+                    return b"[]"
+
+                with mock.patch.object(self.cli, "_process_rows", return_value=processes), \
+                     mock.patch.object(self.cli.subprocess, "check_output", side_effect=registry), \
+                     mock.patch.object(self.cli, "_shim_status", side_effect=lambda state: next(statuses)), \
+                     mock.patch.object(self.cli, "_lease_present", side_effect=lambda *a: next(lease_checks)), \
+                     mock.patch.object(self.cli, "_same_process", return_value=True), \
+                     mock.patch.object(self.cli.os, "kill") as kill:
+                    self.assertEqual(self.cli._cleanup_legacy(directory, "/opt/claude-copilot.sh", "2.0"), 1)
+                    kill.assert_not_called()
+                self.assertTrue(os.path.exists(os.path.join(directory, "shim.state")))
+                self.assertFalse(os.path.exists(os.path.join(directory, "shim.lock")))
+
+    def test_cleanup_dispatch_skips_while_another_cleanup_runs(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as directory:
+            fd = os.open(os.path.join(directory, "legacy-cleanup.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with mock.patch.object(self.cli, "_cleanup_legacy", return_value=0) as cleanup:
+                    self.assertEqual(self.cli.main(["cleanup", directory, "/opt/claude-copilot.sh", "2.0"]), 1)
+                    cleanup.assert_not_called()
+            finally:
+                os.close(fd)
+            with mock.patch.object(self.cli, "_cleanup_legacy", return_value=0) as cleanup:
+                self.assertEqual(self.cli.main(["cleanup", directory, "/opt/claude-copilot.sh", "2.0"]), 0)
+                cleanup.assert_called_once()
 
 
 class BuildArtifact(unittest.TestCase):
@@ -122,9 +576,10 @@ class Upstream:
         self.srv.server_close()
 
 
-def model_entry(mid, endpoints, picker=True, typ="chat", name=None):
+def model_entry(mid, endpoints, picker=True, typ="chat", name=None, preview=False):
     return {"id": mid, "name": name or mid, "model_picker_enabled": picker,
-            "capabilities": {"type": typ}, "supported_endpoints": endpoints}
+            "capabilities": {"type": typ}, "supported_endpoints": endpoints,
+            "preview": preview}
 
 
 class Base(unittest.TestCase):
@@ -357,8 +812,7 @@ class Picker(Base):
         self.assertEqual(shim.picker_models(), [{"type": "model", "id": "a", "display_name": "A"}])
 
     def test_picker_models_marks_preview_models(self):
-        preview = model_entry("preview", [], name="Preview Model")
-        preview["preview"] = True
+        preview = model_entry("preview", [], name="Preview Model", preview=True)
         self.models(model_entry("regular", [], name="Regular Model"), preview)
         self.assertEqual(shim.picker_models(), [
             {"type": "model", "id": "regular", "display_name": "Regular Model"},
@@ -386,8 +840,7 @@ class Picker(Base):
         self.assertEqual(shim.picker_models(), [{"type": "model", "id": "a", "display_name": "a"}])
 
     def test_picker_settings(self):
-        preview = model_entry("b", [], name="B")
-        preview["preview"] = True
+        preview = model_entry("b", [], name="B", preview=True)
         self.models(model_entry("a", [], name="A"), preview)
         self.assertEqual(shim.picker_settings(), {"modelPicker": {"options": [
             {"model": "a", "label": "A"},
