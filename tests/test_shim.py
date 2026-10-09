@@ -54,6 +54,26 @@ shim = load_shim()
 
 
 class CliMain(unittest.TestCase):
+    def test_version(self):
+        from claude_copilot_shim import cli
+        with mock.patch.dict(os.environ, {"COPILOT_SHIM_VERSION": "1.2.0"}):
+            with mock.patch("builtins.print") as output:
+                self.assertEqual(cli.main(["--version"]), 0)
+            output.assert_called_once_with("claude-copilot-shim 1.2.0")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch("builtins.print") as output:
+                self.assertEqual(cli.main(["-V"]), 0)
+            output.assert_called_once_with("claude-copilot-shim unknown")
+
+    def test_shim_server_keeps_runtime_version(self):
+        from claude_copilot_shim import cli
+        with mock.patch.dict(os.environ, {"COPILOT_SHIM_VERSION": "1.2.0"}):
+            server = cli.LocalServer(("127.0.0.1", 0), shim.H)
+        try:
+            self.assertEqual(server.version, "1.2.0")
+        finally:
+            server.server_close()
+
     def test_usage_errors(self):
         from claude_copilot_shim import cli
         self.assertEqual(cli.main([]), 2)
@@ -872,6 +892,15 @@ class Picker(Base):
 # ---------- HTTP surface ----------
 
 class Server(Base):
+    def test_status_reports_runtime_version(self):
+        self.srv.lifecycle_lock = threading.Lock()
+        self.srv.inflight = 1
+        self.srv.draining = False
+        self.srv.version = "1.2.0"
+        s, data, _ = self.req("GET", "/_shim/status")
+        self.assertEqual(s, 200)
+        self.assertEqual(json.loads(data)["version"], "1.2.0")
+
     def test_count_tokens(self):
         s, data, _ = self.post({"messages": [{"role": "user", "content": "x" * 400}]}, "/v1/messages/count_tokens")
         self.assertEqual(s, 200)

@@ -68,6 +68,7 @@ The release workflow is the only publishing step. It never commits `dist/`; reru
 ## Usage
 
 ```sh
+claude-copilot --version       # print the installed launcher version (-v and -V also work)
 claude-copilot                 # interactive
 claude-copilot -p "prompt"     # one-shot
 claude-copilot -c              # resume last session
@@ -102,7 +103,9 @@ One small Python server (bundled into the script) sits between Claude Code and C
         - A rejected `adaptive` (claude-haiku-4.5) is passed through untouched, Claude Code retries without thinking by itself.
     - `/v1/messages/count_tokens` is forwarded to Copilot for models on its native endpoint, which returns a real count. Other models, or any failure, get a rough estimate (request size in bytes / 4).
 - Model aliases (sonnet/opus/haiku/fable) are mapped to Copilot model IDs, since Anthropic's IDs don't exist on Copilot.
-- At startup the script asks the shim for the model list (chat models Copilot marks `model_picker_enabled`; embeddings and other non-chat or hidden models are excluded) and passes it to `claude --settings` as a `modelPicker` list, so `/model` shows selectable chat models. Preview models are labeled `(Preview)`. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
+- At startup the script reads the last complete model list from `model-picker.json` in the state dir and passes it to `claude --settings` as a `modelPicker` list. Cached launches refresh the list in the background without waiting for model discovery. If the cache is missing or invalid, the launcher fetches the list with a 5-second timeout; it reports an error instead of starting Claude with an incomplete picker if discovery fails. The list includes chat models Copilot marks `model_picker_enabled`; embeddings and other non-chat or hidden models are excluded. Preview models are labeled `(Preview)`. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
+
+The model picker cache is stored at `~/.local/share/claude-copilot/model-picker.json`. It contains only the latest complete catalog, is written atomically with mode 600, and is never used to restore environment variables or connection settings. A failed refresh keeps the previous catalog. Delete the file to force the next launch to perform a fresh, blocking discovery.
 
 Lifecycle:
 
@@ -151,6 +154,8 @@ Files:
 
 - `~/.local/share/claude-copilot/claude-copilot.log`: shim log (errors, dropped fields, upstream status codes)
 - `~/.local/share/claude-copilot/github_token`: your GitHub token. Delete it to log in again.
+- `~/.local/share/claude-copilot/model-picker.json`: the last complete model catalog used by `/model`; delete it to force fresh discovery
+- `~/.local/share/claude-copilot/settings-<hash>.json`: mode-600 per-session settings used by Claude Code and background agents; old files are cleaned up after seven days
 
 ## Tested models
 
