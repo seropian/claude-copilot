@@ -19,3 +19,4 @@ __pycache__/
 
 # Generated distribution artifact
 dist/
+/.scout/scout.config.yaml
