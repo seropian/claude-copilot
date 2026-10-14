@@ -536,6 +536,7 @@ chmod +x "$CW/bin/claude"
 cat > "$CW/bin/child" <<FAKE
 #!/bin/sh
 echo "\$ANTHROPIC_BASE_URL \$ANTHROPIC_AUTH_TOKEN|\$*" > "$CW/child.out"
+env | grep -E '^(ANTHROPIC_|AWS_|CLAUDE_CODE_)' | sort > "$CW/child.env"
 exit 5
 FAKE
 chmod +x "$CW/bin/child"
@@ -586,11 +587,14 @@ awk '{print $2, $3}' "$CW/claude.log" | sort -u | grep -qx "$SCRIPT 1"; check "c
 
 # wrapper mode: runs the given command (not claude) against the shared shim, keeps its exit code
 : > "$CW/claude.log"
-cw_run /bin/bash "$SCRIPT" "$CW/bin/child" a b >/dev/null 2>&1; rc=$?
+cw_run env CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CODE_USE_VERTEX=1 CLAUDE_CODE_USE_FOUNDRY=1 CLAUDE_CODE_USE_GATEWAY=1 CLAUDE_CODE_USE_MANTLE=1 ANTHROPIC_API_KEY=leaked-key ANTHROPIC_SMALL_FAST_MODEL=leaked-small CLAUDE_CODE_SUBAGENT_MODEL=leaked-subagent /bin/bash "$SCRIPT" "$CW/bin/child" a b >/dev/null 2>&1; rc=$?
 check "wrapper mode propagates the command's exit code" $((rc == 5 ? 0 : 1)) "rc=$rc"
 contains "$(cat "$CW/child.out")" "|a b"; check "wrapper mode forwards the command args unchanged" $?
 contains "$(cat "$CW/child.out")" "http://127.0.0.1:"; check "wrapper mode points the command at the shim" $?
+! grep -qE '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|CLAUDE_CODE_USE_GATEWAY|CLAUDE_CODE_USE_MANTLE|ANTHROPIC_API_KEY|ANTHROPIC_SMALL_FAST_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)=' "$CW/child.env"
+check "wrapper mode clears inherited provider variables" $?
 [ ! -s "$CW/claude.log" ]; check "wrapper mode does not start claude" $?
+unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_GATEWAY CLAUDE_CODE_USE_MANTLE ANTHROPIC_API_KEY ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_SUBAGENT_MODEL
 
 # Spare wrappers must clean up even when the shim has already disappeared.
 cat > "$CW/bin/spare" <<FAKE
@@ -649,7 +653,17 @@ cw_run /bin/bash "$SCRIPT" child >/dev/null 2>&1
 cat > "$CW/bin/claude" <<FAKE
 #!/bin/sh
 printf '%s\\n' "\$@" > "$CW/claude.args"
+echo "\$ANTHROPIC_BASE_URL \$CLAUDE_CODE_PROCESS_WRAPPER \$CLAUDE_COPILOT_WRAP" >> "$CW/claude.log"
+env | grep -E '^(ANTHROPIC_|AWS_|CLAUDE_CODE_)' | sort > "$CW/claude.env"
 FAKE
+chmod +x "$CW/bin/claude"
+cw_run env CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CODE_USE_VERTEX=1 CLAUDE_CODE_USE_FOUNDRY=1 CLAUDE_CODE_USE_GATEWAY=1 CLAUDE_CODE_USE_MANTLE=1 ANTHROPIC_API_KEY=leaked-key ANTHROPIC_SMALL_FAST_MODEL=leaked-small CLAUDE_CODE_SUBAGENT_MODEL=leaked-subagent /bin/bash "$SCRIPT" -p hi >/dev/null 2>&1
+! grep -qE '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|CLAUDE_CODE_USE_GATEWAY|CLAUDE_CODE_USE_MANTLE|ANTHROPIC_API_KEY|ANTHROPIC_SMALL_FAST_MODEL|CLAUDE_CODE_SUBAGENT_MODEL)=' "$CW/claude.env"
+check "normal launch clears inherited provider variables" $?
+grep -q '^ANTHROPIC_BASE_URL=http://127.0.0.1:' "$CW/claude.env" && grep -q '^ANTHROPIC_AUTH_TOKEN=' "$CW/claude.env"
+check "normal launch keeps the local shim connection" $?
+unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_GATEWAY CLAUDE_CODE_USE_MANTLE ANTHROPIC_API_KEY ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_SUBAGENT_MODEL
+
 rm -f "$CW/bin/curl"
 cat > "$CW/bin/curl" <<FAKE
 #!/bin/sh

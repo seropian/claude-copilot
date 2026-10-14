@@ -140,7 +140,17 @@ _cc_lock_drop() {
 
 # dynamic scope: reads wrap, model, sa from claude-copilot
 _cc_run() {
-  local -a env_args=(env -u ANTHROPIC_MODEL) cmd
+  local -a env_args=(env -u ANTHROPIC_MODEL
+    -u CLAUDE_CODE_USE_ANTHROPIC_AWS
+    -u CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
+    -u CLAUDE_CODE_USE_BEDROCK
+    -u CLAUDE_CODE_USE_FOUNDRY
+    -u CLAUDE_CODE_USE_GATEWAY
+    -u CLAUDE_CODE_USE_MANTLE
+    -u CLAUDE_CODE_USE_VERTEX
+    -u ANTHROPIC_API_KEY
+    -u ANTHROPIC_SMALL_FAST_MODEL
+    -u CLAUDE_CODE_SUBAGENT_MODEL) cmd
   [ -n "$model" ] && env_args+=(ANTHROPIC_MODEL="$model")
   if [ "$wrap" = 1 ]; then
     cmd=("$@")
@@ -573,6 +583,9 @@ e=s.setdefault("env", {}); e.update({
           "ANTHROPIC_BASE_URL": os.environ["CC_SETTINGS_BASE"], "ANTHROPIC_AUTH_TOKEN": os.environ["CC_SETTINGS_KEY"],
           "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ["CC_SETTINGS_SONNET"], "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ["CC_SETTINGS_OPUS"],
           "ANTHROPIC_DEFAULT_FABLE_MODEL": os.environ["CC_SETTINGS_FABLE"], "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ["CC_SETTINGS_HAIKU"],
+          "CLAUDE_CODE_USE_ANTHROPIC_AWS": "0", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "0",
+          "CLAUDE_CODE_USE_BEDROCK": "0", "CLAUDE_CODE_USE_FOUNDRY": "0", "CLAUDE_CODE_USE_GATEWAY": "0",
+          "CLAUDE_CODE_USE_MANTLE": "0", "CLAUDE_CODE_USE_VERTEX": "0",
           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
           "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1"});
 if os.environ["CC_SETTINGS_MODEL"]: e["ANTHROPIC_MODEL"] = os.environ["CC_SETTINGS_MODEL"]
