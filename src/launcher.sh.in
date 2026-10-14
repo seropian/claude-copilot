@@ -574,7 +574,7 @@ __CLAUDE_COPILOT_SHIM__
         CC_SETTINGS_SONNET="${COPILOT_SONNET_MODEL:-claude-sonnet-5.5}" \
         CC_SETTINGS_OPUS="${COPILOT_OPUS_MODEL:-claude-opus-5.5}" \
         CC_SETTINGS_FABLE="${COPILOT_FABLE_MODEL:-claude-opus-5.5}" \
-        CC_SETTINGS_HAIKU="${COPILOT_HAIKU_MODEL:-claude-haiku-4.5}" \
+        CC_SETTINGS_HAIKU="${COPILOT_HAIKU_MODEL:-claude-haiku-5.5}" \
         python3 -c 'import hashlib, json, os, sys, tempfile
 cache = os.path.join(os.environ["CC_SETTINGS_DIR"], "model-picker.json")
 with open(cache) as f: cached = json.load(f)
@@ -610,7 +610,7 @@ os.replace(tmp, p); print(p)') || {
   ANTHROPIC_DEFAULT_SONNET_MODEL="${COPILOT_SONNET_MODEL:-claude-sonnet-5.5}" \
   ANTHROPIC_DEFAULT_OPUS_MODEL="${COPILOT_OPUS_MODEL:-claude-opus-5.5}" \
   ANTHROPIC_DEFAULT_FABLE_MODEL="${COPILOT_FABLE_MODEL:-claude-opus-5.5}" \
-  ANTHROPIC_DEFAULT_HAIKU_MODEL="${COPILOT_HAIKU_MODEL:-claude-haiku-4.5}" \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL="${COPILOT_HAIKU_MODEL:-claude-haiku-5.5}" \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   CLAUDE_CODE_AUTO_MODE_SERVER=0 \
   CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 \
