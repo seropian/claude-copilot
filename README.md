@@ -102,7 +102,7 @@ One small Python server (bundled into the script) sits between Claude Code and C
         - claude-sonnet-5.5 rejects `disabled` (wants `between_tools`).
         - claude-opus-5.5 rejects `disabled`.
         - Most reject `enabled` with a budget (want `adaptive`).
-        - A rejected `adaptive` (claude-haiku-4.5) is passed through untouched, Claude Code retries without thinking by itself.
+        - A rejected `adaptive` (claude-haiku-5.5) is passed through untouched, Claude Code retries without thinking by itself.
     - `/v1/messages/count_tokens` is forwarded to Copilot for models on its native endpoint, which returns a real count. Other models, or any failure, get a rough estimate (request size in bytes / 4).
 - Model aliases (sonnet/opus/haiku/fable) are mapped to Copilot model IDs, since Anthropic's IDs don't exist on Copilot.
 - At startup the script reads the last complete model list from `model-picker.json` in the state dir and passes it to `claude --settings` as a `modelPicker` list. Cached launches refresh the list in the background without waiting for model discovery. If the cache is missing or invalid, the launcher fetches the list with a 5-second timeout; it reports an error instead of starting Claude with an incomplete picker if discovery fails. The list includes chat models Copilot marks `model_picker_enabled`; embeddings and other non-chat or hidden models are excluded. Preview models are labeled `(Preview)`. Claude Code's own gateway discovery isn't used: it drops any id without `claude` in it.
@@ -135,7 +135,7 @@ All env vars, all optional.
 | `COPILOT_SONNET_MODEL` | `claude-sonnet-5.5` | `sonnet` alias target |
 | `COPILOT_OPUS_MODEL` | `claude-opus-5.5` | `opus` alias target |
 | `COPILOT_FABLE_MODEL` | `claude-opus-5.5` | `fable` alias target. Copilot has no Fable model, so picking it really gives you whatever this points to |
-| `COPILOT_HAIKU_MODEL` | `claude-haiku-4.5` | `haiku` alias target |
+| `COPILOT_HAIKU_MODEL` | `claude-haiku-5.5` | `haiku` alias target |
 | `COPILOT_AUTO_UPDATE` | on | set to `0` to turn off the background update check and the exit-time self-update; rerun the installer to update by hand |
 | `COPILOT_SHIM_PORT` | unset (free port) | choose the shared shim's port on startup; must match an already-running shim |
 | `COPILOT_SHIM_IDLE_GRACE` | `30` seconds | time without leases or in-flight requests before the shim exits; `0` disables idle cleanup |
@@ -163,7 +163,7 @@ Files:
 
 **Last checked 2026-10-02 with Claude Code 2.1.286, results may be stale.** Each model got a plain "reply ok" check and a Bash tool-call check, streaming, through the shim. Images were checked on one model per route (claude-sonnet-5.5, gpt-5.5, gemini-3.7-flash).
 
-- **Work (models tested on 2026-10-02):** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-4.5, gemini-3.7-flash, gemini-3.8-flash, gpt-5.3-codex, gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-5-mini, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, kimi-k2.7-code, kimi-k3, mai-code-1.1-flash
+- **Work (models tested on 2026-10-02):** claude-opus-4.7, claude-opus-4.8, claude-opus-5.5, claude-opus-5, claude-sonnet-5.5, claude-sonnet-5, claude-haiku-5.5, gemini-3.7-flash, gemini-3.8-flash, gpt-5.3-codex, gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-luna/-sol/-terra, gpt-5-mini, gpt-6-luna/-sol, gpt-6.1-sol, grok-4.7, kimi-k2.7-code, kimi-k3, mai-code-1.1-flash
 - **Legacy or untested chat models:** these appear in the picker only when Copilot includes them in `/models` and marks them `model_picker_enabled`; they go through `/chat/completions`:
     - gpt-4, gpt-4-0613, gpt-4-0125-preview: work (checked 2026-10-02)
     - gpt-4o*, gpt-4.1*, gpt-3.5-turbo*, gpt-4-o-preview: untested. Every call got 429 "exceeded your rate limit for utility models" (account-level limit after a burst of test requests)

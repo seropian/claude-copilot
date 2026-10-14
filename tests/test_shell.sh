@@ -216,7 +216,7 @@ case "$out" in *TOKEN=????????????????????????*) t=0 ;; *) t=1 ;; esac; check "l
 contains "$out" "MODEL="; check "default leaves model selection to Claude Code" $?
 contains "$out" "SONNET=claude-sonnet-5.5"; check "default sonnet mapping" $?
 contains "$out" "OPUS=claude-opus-5.5"; check "default opus mapping" $?
-contains "$out" "HAIKU=claude-haiku-4.5"; check "default haiku mapping" $?
+contains "$out" "HAIKU=claude-haiku-5.5"; check "default haiku mapping" $?
 contains "$out" "NONESS=1"; check "nonessential traffic disabled" $?
 case "$out" in *"ARGS=--model"*) t=1 ;; *) t=0 ;; esac
 check "default does not pass --model to claude" $?

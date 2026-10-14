@@ -27,7 +27,7 @@ if [ ! -s "$HOME/.local/share/claude-copilot/github_token" ]; then
   echo "skip - e2e: no GitHub login stored, run claude-copilot once first"; exit 0
 fi
 
-NATIVE="${E2E_NATIVE:-claude-haiku-4.5}"
+NATIVE="${E2E_NATIVE:-claude-haiku-5.5}"
 RESPONSES="${E2E_RESPONSES:-gpt-5-mini}"
 CHAT="${E2E_CHAT:-gemini-3.7-flash}"
 
