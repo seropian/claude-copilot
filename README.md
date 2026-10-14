@@ -79,6 +79,8 @@ claude-copilot --restart-shim    # replace it, then start Claude Code
 
 All args go straight to `claude`, except the two shim-management options. Exit code is passed through. If `COPILOT_CLAUDE_MODEL` is unset, Claude Code uses the model saved by `/model` (or its own default on the first run).
 
+Do not alias `claude-code` (or `claude`) to `claude-copilot`. The launcher is an adapter around Claude Code, not a drop-in replacement for every Claude Code command: aliases can route commands such as `claude daemon stop` through the Copilot launcher, which starts the shim and forwards the arguments instead of invoking Claude Code's daemon command directly.
+
 ## How it works
 
 ```
