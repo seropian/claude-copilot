@@ -112,6 +112,7 @@ uc_staged() { # running version, latest published
   [ -s "$UC/state" ]
 }
 uc_staged 1.0.0 1.1.0; check "update check stages a newer release" $?
+uc_staged 1.3.0 1.3.1; check "older launcher still stages the latest release" $?
 uc_staged 1.1.0 1.1.0; [ $? -ne 0 ]; check "update check ignores the same version" $?
 uc_staged 1.2.0 1.1.0; [ $? -ne 0 ]; check "update check ignores an older release" $?
 uc_staged 1.9.0 1.10.0; check "update check compares numerically (1.10.0 > 1.9.0)" $?
@@ -333,6 +334,10 @@ FLOW_HOME="$FLOW/st-ver-home" run_flow
 contains "$(cat "$FLOW/stderr")" "updated 0.0.1 -> "; check "update notice when the version changed" $?
 FLOW_HOME="$FLOW/st-ver-home" run_flow
 ! contains "$(cat "$FLOW/stderr")" "updated"; check "update notice shows only once" $?
+NEWER_MARKER="$TMP/newer-version"
+printf '1.3.1\n' > "$NEWER_MARKER"
+out=$(/bin/bash -c ". '$SCRIPT'; _cc_version=1.3.0; _cc_announce_update '$NEWER_MARKER'" 2>&1)
+contains "$out" "newer version 1.3.1 already ran" && [ "$(cat "$NEWER_MARKER")" = 1.3.1 ]; check "older launcher notices newer version and preserves marker" $?
 
 # Deferred legacy cleanup is retried on later launches and does not advance its marker.
 LR="$FLOW/legacy-cleanup"
