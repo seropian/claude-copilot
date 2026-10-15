@@ -98,7 +98,7 @@ UC_SUM=$("$PY" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "
 cat > "$UC/bin/curl" <<EOF
 #!/bin/sh
 case "\$*" in
-  *releases/latest) printf 'https://github.com/seropian/claude-copilot/releases/tag/v%s' "\$FAKE_LATEST" ;;
+  *releases/latest) [ -n "\$FAKE_FAIL" ] && exit 22; printf '%s' "\${FAKE_URL:-https://github.com/seropian/claude-copilot/releases/tag/v\$FAKE_LATEST}" ;;
   *.sha256*) echo "$UC_SUM  claude-copilot.sh" ;;
   *) while [ \$# -gt 0 ]; do [ "\$1" = -o ] && cp "$UC/payload" "\$2"; shift; done ;;
 esac
@@ -116,6 +116,16 @@ uc_staged 1.3.0 1.3.1; check "older launcher still stages the latest release" $?
 uc_staged 1.1.0 1.1.0; [ $? -ne 0 ]; check "update check ignores the same version" $?
 uc_staged 1.2.0 1.1.0; [ $? -ne 0 ]; check "update check ignores an older release" $?
 uc_staged 1.9.0 1.10.0; check "update check compares numerically (1.10.0 > 1.9.0)" $?
+uc_lookup() { # env assignment for the fake curl; true when an update was staged
+  rm -f "$UC/state"
+  env PATH="$UC/bin:/usr/bin:/bin" "$1" /bin/bash -c ". '$SCRIPT'; _cc_version=1.3.0; _cc_check_update '$UC/app' '$UC/state' \$\$" >/dev/null 2>&1
+  [ -s "$UC/state" ]
+}
+uc_lookup FAKE_URL=https://github.com/seropian/claude-copilot/releases/tag/v1.9.0; check "update check reads the latest tag from the releases redirect" $?
+uc_lookup FAKE_URL=https://github.com/seropian/claude-copilot/releases; [ $? -ne 0 ]; check "update check ignores a redirect with no release tag" $?
+uc_lookup FAKE_URL=https://github.com/seropian/claude-copilot/releases/tag/1.9.0; [ $? -ne 0 ]; check "update check ignores a tag without the v prefix" $?
+uc_lookup FAKE_URL='<html>'; [ $? -ne 0 ]; check "update check ignores a non-URL lookup result" $?
+uc_lookup FAKE_FAIL=1; [ $? -ne 0 ]; check "update check does nothing when the lookup fails" $?
 rm -f "$UC"/.claude-copilot-update.*
 rm -f "$UC/state"; PATH="$UC/bin:/usr/bin:/bin" FAKE_LATEST=1.1.0 /bin/bash -c ". '$SCRIPT'; _cc_version=1.0.0; _cc_check_update '$UC/app' '$UC/state' 999999" >/dev/null 2>&1
 [ ! -e "$UC/state" ] && [ -z "$(ls -A "$UC" | grep '^.claude-copilot-update')" ]; check "update check drops its download when the launcher is gone" $?
