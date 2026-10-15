@@ -236,7 +236,21 @@ _cc_announce_update() {
   [ -f "$f" ] && read -r old < "$f" 2>/dev/null
   _cc_previous_version="$old"
   [ "$old" = "$_cc_version" ] && return 0
-  [ -n "$old" ] && echo "claude-copilot: updated $old -> $_cc_version" >&2
+  if [ -n "$old" ]; then
+    # The marker is shared by all launcher copies. An older copy must not
+    # overwrite a newer version or report the downgrade as an update.
+    # Exit 3 means "not newer"; any other failure keeps the old behavior.
+    python3 -c '
+import re, sys
+
+def version(s):
+    return tuple(int(x) for x in re.findall(r"\d+", s.split("-")[0].split("+")[0]))
+
+sys.exit(0 if version(sys.argv[1]) > version(sys.argv[2]) else 3)
+' "$_cc_version" "$old" 2>/dev/null
+    [ $? -eq 3 ] && return 0
+    echo "claude-copilot: updated $old -> $_cc_version" >&2
+  fi
   ( umask 077; printf '%s\n' "$_cc_version" > "$f.tmp" && mv -f "$f.tmp" "$f" ) 2>/dev/null
   return 0
 }
@@ -452,7 +466,7 @@ claude-copilot() {
     done
   fi
 
-  [ "$wrap" = 1 ] || _cc_start_update_check "$script"
+  _cc_start_update_check "$script"
   # Shim source (python). Usage: login | serve <port, 0 = any free> <file to write "pid port" to>.
   # The lease directory is shared with the shim so it can reap clients after hard launcher crashes.
   # login: GitHub device-code login, token kept in ~/.local/share/claude-copilot.
