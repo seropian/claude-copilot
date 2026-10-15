@@ -337,7 +337,7 @@ FLOW_HOME="$FLOW/st-ver-home" run_flow
 NEWER_MARKER="$TMP/newer-version"
 printf '1.3.1\n' > "$NEWER_MARKER"
 out=$(/bin/bash -c ". '$SCRIPT'; _cc_version=1.3.0; _cc_announce_update '$NEWER_MARKER'" 2>&1)
-contains "$out" "newer version 1.3.1 already ran" && [ "$(cat "$NEWER_MARKER")" = 1.3.1 ]; check "older launcher notices newer version and preserves marker" $?
+! contains "$out" "updated" && [ "$(cat "$NEWER_MARKER")" = 1.3.1 ]; check "older launcher keeps the newer version marker and stays quiet" $?
 
 # Deferred legacy cleanup is retried on later launches and does not advance its marker.
 LR="$FLOW/legacy-cleanup"

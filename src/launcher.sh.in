@@ -237,19 +237,18 @@ _cc_announce_update() {
   _cc_previous_version="$old"
   [ "$old" = "$_cc_version" ] && return 0
   if [ -n "$old" ]; then
-    # The marker is shared by all launcher copies. Do not let an older copy
+    # The marker is shared by all launcher copies. An older copy must not
     # overwrite a newer version or report the downgrade as an update.
+    # Exit 3 means "not newer"; any other failure keeps the old behavior.
     python3 -c '
 import re, sys
 
 def version(s):
     return tuple(int(x) for x in re.findall(r"\d+", s.split("-")[0].split("+")[0]))
 
-sys.exit(0 if version(sys.argv[1]) > version(sys.argv[2]) else 1)
-' "$_cc_version" "$old" 2>/dev/null || {
-      echo "claude-copilot: newer version $old already ran; this copy will update in the background" >&2
-      return 0
-    }
+sys.exit(0 if version(sys.argv[1]) > version(sys.argv[2]) else 3)
+' "$_cc_version" "$old" 2>/dev/null
+    [ $? -eq 3 ] && return 0
     echo "claude-copilot: updated $old -> $_cc_version" >&2
   fi
   ( umask 077; printf '%s\n' "$_cc_version" > "$f.tmp" && mv -f "$f.tmp" "$f" ) 2>/dev/null
@@ -310,12 +309,6 @@ _cc_check_update() {
   latest=$(curl -fsSL -m 5 https://api.github.com/repos/seropian/claude-copilot/releases/latest 2>/dev/null |
     python3 -c 'import json, sys; tag = json.load(sys.stdin).get("tag_name", ""); print(tag[1:] if tag.startswith("v") else tag)' 2>/dev/null) || return 0
   [ -n "$latest" ] || return 0
-  python3 -c '
-import re, sys
-
-def v(s):
-    return tuple(int(x) for x in re.findall(r"\d+", s.split("-")[0].split("+")[0]))
-sys.exit(0 if v(sys.argv[1]) > v(sys.argv[2]) else 1)' "$latest" "$_cc_version" 2>/dev/null || return 0
   python3 -c '
 import re, sys
 def v(s):
@@ -503,7 +496,7 @@ __CLAUDE_COPILOT_SHIM__
   local sf opid="" oport="" okey="" over="" want="$sport" healthy=0
   sf="$sdir/shim.state"
   _cc_lease_file=""
-  _cc_announce_update "$sdir/last-version"
+  [ "$wrap" = 1 ] || _cc_announce_update "$sdir/last-version"
   _cc_lock_take "$sdir/shim.lock" || { echo "claude-copilot: timed out waiting for $sdir/shim.lock (if no other claude-copilot is starting, rm -rf it)" >&2; _cc_fail; return; }
   [ -f "$sf" ] && [ ! -L "$sf" ] && read -r opid oport okey over < "$sf" 2>/dev/null
   case "$oport" in ''|*[!0-9]*) oport=""; okey="" ;; esac
