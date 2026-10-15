@@ -98,7 +98,7 @@ UC_SUM=$("$PY" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "
 cat > "$UC/bin/curl" <<EOF
 #!/bin/sh
 case "\$*" in
-  *api.github.com*) echo "{\"tag_name\": \"v\$FAKE_LATEST\"}" ;;
+  *releases/latest) printf 'https://github.com/seropian/claude-copilot/releases/tag/v%s' "\$FAKE_LATEST" ;;
   *.sha256*) echo "$UC_SUM  claude-copilot.sh" ;;
   *) while [ \$# -gt 0 ]; do [ "\$1" = -o ] && cp "$UC/payload" "\$2"; shift; done ;;
 esac
