@@ -306,8 +306,11 @@ _cc_check_update() {
   dir="${script%/*}"
   [ "$dir" = "$script" ] && dir="."
   [ -w "$dir" ] || return 0
-  latest=$(curl -fsSL -m 5 https://api.github.com/repos/seropian/claude-copilot/releases/latest 2>/dev/null |
-    python3 -c 'import json, sys; tag = json.load(sys.stdin).get("tag_name", ""); print(tag[1:] if tag.startswith("v") else tag)' 2>/dev/null) || return 0
+  # Resolve the newest tag from the releases/latest redirect: unlike api.github.com it
+  # is not rate limited per IP, which silently stopped updates behind shared NATs.
+  latest=$(curl -fsSIL -m 5 -o /dev/null -w '%{url_effective}' \
+    https://github.com/seropian/claude-copilot/releases/latest 2>/dev/null) || return 0
+  case "$latest" in */releases/tag/v[0-9]*) latest="${latest##*/v}" ;; *) return 0 ;; esac
   [ -n "$latest" ] || return 0
   python3 -c '
 import re, sys
